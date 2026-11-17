@@ -1,7 +1,4 @@
-# Jean-Claude Van Code
-
 <img width="1334" height="502" alt="image" src="https://github.com/user-attachments/assets/d54be0a3-0f5a-4886-a5ec-bb542eae703d" />
-
 
 A Claude Code mod for coding that is **assertive, economical and straight to the point**.
 
