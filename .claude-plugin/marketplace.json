@@ -1,0 +1,5 @@
+{
+  "name": "van-code",
+  "owner": { "name": "lagemanngui" },
+  "plugins": [{ "name": "van-code", "source": "./" }]
+}

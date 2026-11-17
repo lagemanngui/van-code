@@ -1,0 +1,72 @@
+{
+  "name": "van-code",
+  "version": "0.1.0",
+  "description": "Jean-Claude Van Code: a flying-kick intro plus guards, checks and cheap reviews for assertive, economical coding with Claude Code",
+  "userConfig": {
+    "intro": {
+      "type": "boolean",
+      "title": "Intro animation",
+      "description": "The flying kick into Clawd when Claude starts. Off: the factory checklist shows only when something is missing.",
+      "default": true
+    },
+    "guard": {
+      "type": "boolean",
+      "title": "Heavy-file guard",
+      "description": "Blocks whole reads of lockfiles, node_modules, build output and minified files. /van-code-guard toggles it for the session.",
+      "default": true
+    },
+    "readMemory": {
+      "type": "boolean",
+      "title": "Read memory",
+      "description": "Refuses to re-read a file that has not changed since the last read.",
+      "default": true
+    },
+    "postEditCheck": {
+      "type": "boolean",
+      "title": "Post-edit check",
+      "description": "Runs tsc, ruff, go vet or bash -n on the edited file and hands the errors back to Claude.",
+      "default": true
+    },
+    "proveIt": {
+      "type": "boolean",
+      "title": "Prove it works",
+      "description": "Asks Claude to verify when it edits code and runs no test or build.",
+      "default": true
+    },
+    "chongLi": {
+      "type": "boolean",
+      "title": "Automatic Chong Li",
+      "description": "A cheap adversarial review (Haiku) of big or risky changes. /chong-li always works.",
+      "default": true
+    },
+    "suggestions": {
+      "type": "boolean",
+      "title": "Reply suggestions",
+      "description": "Proposes your next message (Tab) when Claude Code proposes none. Uses Haiku.",
+      "default": true
+    },
+    "contextAlarm": {
+      "type": "boolean",
+      "title": "Context alarm",
+      "description": "Warns when context passes 60%.",
+      "default": true
+    },
+    "rules": {
+      "type": "boolean",
+      "title": "Van Code rules",
+      "description": "Extra instructions for Claude: verify before claiming, read only what is needed, be direct, test before saying done.",
+      "default": true
+    },
+    "usageHeader": {
+      "type": "boolean",
+      "title": "Usage header",
+      "description": "Model, rate-limit bars (5h, 7d) with time until reset, and context, above the prompt.",
+      "default": true
+    }
+  },
+  "license": "MIT",
+  "author": {
+    "name": "lagemanngui"
+  },
+  "homepage": "https://github.com/lagemanngui/van-code"
+}
