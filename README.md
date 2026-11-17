@@ -1,8 +1,9 @@
 # Jean-Claude Van Code
 
-A Claude Code mod for coding that is **assertive, economical and straight to the point**.
+<img width="1334" height="502" alt="image" src="https://github.com/user-attachments/assets/d54be0a3-0f5a-4886-a5ec-bb542eae703d" />
 
-When Claude starts, a martial artist runs in and lands a flying kick on Clawd. After that the mod works quietly: it guards heavy files, checks every edit, asks for proof before "done", reviews risky changes on the cheap and suggests your next message.
+
+A Claude Code mod for coding that is **assertive, economical and straight to the point**.
 
 ## Install
 
