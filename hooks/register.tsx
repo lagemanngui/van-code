@@ -142,11 +142,10 @@ let isContextWarned = false
 
 const RULES = `# Jean-Claude Van Code
 - Assertive: verify before you claim. If unsure, check with a tool instead of guessing, and say plainly what you did not check.
-- Economical: Grep or Glob first, then Read only the slice you need (offset/limit). Never read lockfiles, dependencies, build output or minified files whole.
+- Economical: the fewest steps that do the job. Read a small file (under ~300 lines) whole, once; in a big file or unfamiliar code, Grep first and Read only the slice you need. Never read lockfiles, dependencies, build output or minified files whole.
 - Direct: lead with the answer. No preamble, no recap of what was already said.
-- Proven: before calling a code change done, run the relevant test, build or type-check and report the result.
-- Tests: to verify a change, call affected_tests and run only those tests, not the whole suite.
-- Assumptions: on a non-trivial task, record what the plan rests on in the assumptions tool and verify each before writing code.`
+- Proven: before calling a change done, run the tests, build or type-check that cover it and report the result; in a big suite, affected_tests lists only the tests that matter.
+- Assumptions: on a task spanning several files or an unfamiliar API, record what the plan rests on in the assumptions tool and verify each before writing code.`
 
 const OCR_RULE =
   '- Documents: to read a PDF or scan as text, run `indra-ocr <file> --out <dir>` (local, free) and Grep or Read the .md it writes; Read the PDF itself only for figures, charts or layout, or a few pages (`pages`).'
