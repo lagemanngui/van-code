@@ -17,7 +17,7 @@ python3 bench/run.py --runs 3 --max-cost 10           # every case, every arm
 python3 bench/run.py --cases 'heavy-*' --arms pure,vancode --model sonnet
 ```
 
-`--max-cost` stops launching runs past that total; `--run-budget` caps each run; `-j` runs in parallel (one rate limit for all). Results go to `bench/results/<time>/`: `runs.jsonl` (one line per run: cost, tokens, tool calls by name, turns, time, grade output) and `summary.md` (medians per case and arm). `results/` is not committed.
+`--max-cost` stops launching runs past that total; `--run-budget` caps each run; `-j` runs in parallel (one rate limit for all). Results go to `bench/results/<time>/`: `runs.jsonl` (one line per run: cost, tokens, tool calls by name, turns, time, grade output) and `summary.md` (medians per case and arm, plus the mod's refusals by kind: heavy, repeat-read, pdf-ocr, json-jq, and the other tool errors). `results/` is not committed. `python3 bench/test_run.py` checks the stream parser.
 
 The `full` arm needs `rtk` on PATH and the ponytail and commit-commands plugins installed; the `heavy-read` case uses Indra and jq when the arm has them.
 

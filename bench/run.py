@@ -53,6 +53,60 @@ def clean_env():
     return env
 
 
+# What a van-code refusal says, by kind.
+BLOCK_KINDS = [
+    ('heavy', 'is a heavy file'),
+    ('repeat-read', 'you already read'),
+    ('pdf-ocr', 'is cheaper as text'),
+    ('json-jq', 'of JSON. Slice it with jq'),
+]
+
+
+def block_kind(text):
+    return next((k for k, needle in BLOCK_KINDS if needle in text), 'other')
+
+
+def parse_stream(stdout):
+    """The run's facts from Claude Code's stream-json: model, plugins, tools, blocks, result."""
+    rec, tools, names, blocks, tool_errors = {}, {}, {}, [], 0
+    for line in stdout.splitlines():
+        try:
+            m = json.loads(line)
+        except ValueError:
+            continue
+        if m.get('type') == 'system' and m.get('subtype') == 'init':
+            rec['model'] = m.get('model')
+            rec['plugins'] = sorted(x['name'] for x in m.get('plugins', []) if x.get('path') != 'builtin')
+        elif m.get('type') == 'assistant':
+            for b in m.get('message', {}).get('content', []):
+                if b.get('type') == 'tool_use':
+                    tools[b['name']] = tools.get(b['name'], 0) + 1
+                    names[b['id']] = b['name']
+        elif m.get('type') == 'user':
+            for b in m.get('message', {}).get('content', []):
+                if not (isinstance(b, dict) and b.get('type') == 'tool_result' and b.get('is_error')):
+                    continue
+                c = b.get('content')
+                text = c if isinstance(c, str) else ' '.join(x.get('text', '') for x in c or [] if isinstance(x, dict))
+                if 'Jean-Claude Van Code' in text:
+                    blocks.append({'tool': names.get(b.get('tool_use_id'), '?'), 'kind': block_kind(text), 'text': text[:200]})
+                else:
+                    tool_errors += 1  # a failed command, a missing file: not the mod
+        elif m.get('type') == 'result':
+            u = m.get('usage') or {}
+            rec.update(
+                cost_usd=m.get('total_cost_usd'),
+                turns=m.get('num_turns'),
+                is_error=m.get('is_error'),
+                input_tokens=(u.get('input_tokens') or 0) + (u.get('cache_creation_input_tokens') or 0) + (u.get('cache_read_input_tokens') or 0),
+                output_tokens=u.get('output_tokens') or 0,
+                permission_denials=len(m.get('permission_denials') or []),
+                answer=(m.get('result') or '')[-500:],
+            )
+    rec.update(tools=tools, tool_calls=sum(tools.values()), blocks=blocks, mod_blocks=len(blocks), tool_errors=tool_errors)
+    return rec
+
+
 def run_one(case, arm, i, args):
     work = Path(tempfile.mkdtemp(prefix=f'vcbench-{case.name}-{arm}-'))
     rec = {'case': case.name, 'arm': arm, 'run': i, 'work': str(work)}
@@ -69,31 +123,7 @@ def run_one(case, arm, i, args):
         t0 = time.time()
         p = subprocess.run(cmd, cwd=work, env=clean_env(), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=args.timeout)
         rec['wall_s'] = round(time.time() - t0, 1)
-        tools = {}
-        for line in p.stdout.splitlines():
-            try:
-                m = json.loads(line)
-            except ValueError:
-                continue
-            if m.get('type') == 'system' and m.get('subtype') == 'init':
-                rec['model'] = m.get('model')
-                rec['plugins'] = sorted(x['name'] for x in m.get('plugins', []) if x.get('path') != 'builtin')
-            elif m.get('type') == 'assistant':
-                for b in m.get('message', {}).get('content', []):
-                    if b.get('type') == 'tool_use':
-                        tools[b['name']] = tools.get(b['name'], 0) + 1
-            elif m.get('type') == 'result':
-                u = m.get('usage') or {}
-                rec.update(
-                    cost_usd=m.get('total_cost_usd'),
-                    turns=m.get('num_turns'),
-                    is_error=m.get('is_error'),
-                    input_tokens=(u.get('input_tokens') or 0) + (u.get('cache_creation_input_tokens') or 0) + (u.get('cache_read_input_tokens') or 0),
-                    output_tokens=u.get('output_tokens') or 0,
-                    answer=(m.get('result') or '')[-500:],
-                )
-        rec['tools'] = tools
-        rec['tool_calls'] = sum(tools.values())
+        rec.update(parse_stream(p.stdout))
         if 'cost_usd' not in rec:
             rec['error'] = 'no result: ' + p.stderr[-500:]
         # hidden check: copied in only now, so Claude never saw it
@@ -118,9 +148,18 @@ def med(xs):
     return statistics.median(xs) if xs else None
 
 
+def blocks_cell(rs):
+    kinds = {}
+    for r in rs:
+        for b in r.get('blocks', []):
+            kinds[b['kind']] = kinds.get(b['kind'], 0) + 1
+    total = sum(kinds.values())
+    return f"{total}: " + ', '.join(f'{k}×{n}' for k, n in sorted(kinds.items())) if total else '0'
+
+
 def summarize(recs):
-    rows = ['| case | arm | passed | cost US$ (median) | input tokens | output tokens | tool calls | turns | wall s |',
-            '|---|---|---|---|---|---|---|---|---|']
+    rows = ['| case | arm | passed | cost US$ (median) | input tokens | output tokens | tool calls | turns | wall s | mod blocks (all runs) | tool errors |',
+            '|---|---|---|---|---|---|---|---|---|---|---|']
     for case in sorted({r['case'] for r in recs}):
         for arm in ARMS:
             rs = [r for r in recs if r['case'] == case and r['arm'] == arm]
@@ -128,7 +167,8 @@ def summarize(recs):
                 continue
             f = lambda k, fmt='{:.0f}': (fmt.format(med([r.get(k) for r in rs])) if med([r.get(k) for r in rs]) is not None else '–')
             rows.append(f"| {case} | {arm} | {sum(r.get('passed', False) for r in rs)}/{len(rs)} | {f('cost_usd', '{:.3f}')} | "
-                        f"{f('input_tokens')} | {f('output_tokens')} | {f('tool_calls')} | {f('turns')} | {f('wall_s')} |")
+                        f"{f('input_tokens')} | {f('output_tokens')} | {f('tool_calls')} | {f('turns')} | {f('wall_s')} | "
+                        f"{blocks_cell(rs)} | {sum(r.get('tool_errors', 0) for r in rs)} |")
     return '\n'.join(rows)
 
 
