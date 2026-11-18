@@ -41,6 +41,24 @@ test("a subagent's turn end does not judge the main turn's edits", async ($, on)
   expect(w.context()).toContain('ran no test')
 })
 
+test('a clean syntax check of a file no test reaches counts as verification', async ($, on) => {
+  const w = world(on, 0) // bash -n passes, git grep finds no importer
+  await $.tool.call({ tool: 'Edit', file_path: '/p/run-all.sh', old_string: 'a', new_string: 'b' })
+  await $.turn.complete({ answer: 'ok' } as never)
+  for (let i = 0; i < 50; i++) await Promise.resolve() // the test search runs after the turn
+  await $.prompt.submit({ text: 'next' } as never)
+  expect(w.context()).not.toContain('ran no test')
+})
+
+test('a failed syntax check of an untested file still asks to verify', async ($, on) => {
+  const w = world(on, 2)
+  await $.tool.call({ tool: 'Edit', file_path: '/p/run-all.sh', old_string: 'a', new_string: 'b' })
+  await $.turn.complete({ answer: 'ok' } as never)
+  for (let i = 0; i < 50; i++) await Promise.resolve()
+  await $.prompt.submit({ text: 'next' } as never)
+  expect(w.context()).toContain('ran no test')
+})
+
 test('the scoreboard counts a skipped repeat read', async ($, on) => {
   world(on)
   const read = () => $.tool.call({ tool: 'Read', file_path: '/p/a.ts' })

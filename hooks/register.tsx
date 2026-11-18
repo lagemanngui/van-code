@@ -1,6 +1,7 @@
 import type { EngineInterface, ModelUsage, PluginOptions, Register } from 'claude-code'
 
-import { checkFile, testsText } from './checks.js'
+import { affectedTests, checkFile, testsText } from './checks.js'
+import { isCovered, parseShellRead, type Range, readRange, resolvePath } from './reads.js'
 import { checkAll, install, isLacking, langs, RECS, run, setCwd, status } from './factory.js'
 import { type Cell, cells, LAST, MAX_W, MIN_W, pixels } from './intro.js'
 import {
@@ -50,6 +51,9 @@ const stats = {
   readsSkipped: 0,
   readTokens: 0,
   heavyBlocked: 0,
+  pdfsToOcr: 0,
+  jsonToJq: 0,
+  loopsCaught: 0,
   heavyTokens: 0,
   checkCatches: 0,
   chongRuns: 0,
@@ -65,14 +69,19 @@ const countUsage = (u?: ModelUsage) => {
   stats.haikuIn += (u?.input_tokens ?? 0) + (u?.cache_creation_input_tokens ?? 0) + (u?.cache_read_input_tokens ?? 0)
   stats.haikuOut += u?.output_tokens ?? 0
 }
+const onOff = (b: boolean) => (b ? 'on' : 'off')
 const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
 
 function statsText() {
   return [
     'Jean-Claude Van Code · session scoreboard (token figures are estimates)',
-    `Repeat reads skipped: ${stats.readsSkipped} (~${k(stats.readTokens)} tokens)`,
-    `Heavy files blocked: ${stats.heavyBlocked} (~${k(stats.heavyTokens)} tokens)`,
-    `Errors caught right after an edit: ${stats.checkCatches}`,
+    `Repeat reads skipped: ${stats.readsSkipped} (~${k(stats.readTokens)} tokens) · read memory ${onOff(isOn('readMemory'))}`,
+    `Heavy files blocked: ${stats.heavyBlocked} (~${k(stats.heavyTokens)} tokens) · guard ${onOff(isGuardOn)}`,
+    `PDFs pointed to Indra OCR: ${stats.pdfsToOcr} · ${status.indra === 'ok' ? 'indra installed' : 'indra not installed'}`,
+    `Big JSON pointed to jq: ${stats.jsonToJq} · ${status.jq === 'ok' ? 'jq installed' : 'jq not installed'}`,
+    `Loops caught (the same command failing ${LOOP_FAILS} times in a row): ${stats.loopsCaught}`,
+    lastTask ? `Last request: ${lastTask}` : 'Last request: none finished yet',
+    `Errors caught right after an edit: ${stats.checkCatches} (type or syntax errors the post-edit check found in an edited file · post-edit check ${onOff(isOn('postEditCheck'))})`,
     `Chong Li: ${stats.chongRuns} reviews, ${stats.chongFindings} findings`,
     `Mod suggestions: ${stats.suggestShown} shown, ${stats.suggestTaken} taken`,
     `Haiku calls: ${k(stats.haikuIn)} input tokens, ${k(stats.haikuOut)} output tokens`,
@@ -88,7 +97,7 @@ let isGuardOn = true
 // "Prove it works": code edited in a turn with no test/build/type-check after.
 const CODE_FILE = /\.(ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|kt|swift|c|h|cpp|cs|php|scala|sh|vue|svelte|gd|lua|ex|exs|dart)$/
 const VERIFY =
-  /\b(test|tests|pytest|jest|vitest|mocha|tsc|build|lint|eslint|check|validate|cargo|go (test|build|vet)|make|gradle|mvn|swift (build|test)|xcodebuild|ruff|mypy|rspec)\b/
+  /\b(test|tests|pytest|jest|vitest|mocha|tsc|build|lint|eslint|check|validate|cargo|go (test|build|vet)|make|gradle|mvn|swift (build|test)|xcodebuild|ruff|mypy|rspec|shellcheck|py_compile)\b|\b(ba|z|da)?sh -n\b/
 let hasUnverifiedEdit = false
 // Notes the model reads with the person's next message.
 let notes: string[] = []
@@ -138,6 +147,51 @@ const RULES = `# Jean-Claude Van Code
 - Proven: before calling a code change done, run the relevant test, build or type-check and report the result.
 - Tests: to verify a change, call affected_tests and run only those tests, not the whole suite.
 - Assumptions: on a non-trivial task, record what the plan rests on in the assumptions tool and verify each before writing code.`
+
+const OCR_RULE =
+  '- Documents: to read a PDF or scan as text, run `indra-ocr <file> --out <dir>` (local, free) and Grep or Read the .md it writes; Read the PDF itself only for figures, charts or layout, or a few pages (`pages`).'
+
+// PDFs: more than this many pages as images costs more than Indra's text.
+const OCR_MIN_PAGES = 4
+const pdfPages = (pages?: string) => {
+  if (!pages) return Infinity
+  const [a, b] = pdfRange(pages)
+  return b - a + 1
+}
+const pdfRange = (pages: string): Range => {
+  const [a, b = a] = pages.split('-').map(Number)
+  return [a!, b!]
+}
+const onceWarned = new Set<string>() // PDF and JSON redirects: once per agent and file; insisting goes through
+
+// Big JSON: sliced with jq rather than read whole.
+const JSON_MAX = 32_000 // bytes
+const JQ_RULE = '- JSON: slice a big JSON file with jq (`jq keys`, `jq \'.path\'`) instead of reading it whole.'
+async function jsonDeny($: EngineInterface, agentId: string | undefined, file: string) {
+  if (status.jq !== 'ok' || !/\.json$/i.test(file)) return undefined
+  const key = readKey(agentId, file)
+  if (onceWarned.has(key)) return undefined
+  const st = await $.fs.stat(file).catch(() => undefined)
+  if (!st || st.size <= JSON_MAX) return undefined
+  onceWarned.add(key)
+  stats.jsonToJq += 1
+  return (
+    `Jean-Claude Van Code: ${file} is ${Math.round(st.size / 1000)} KB of JSON. Slice it with jq: \`jq keys\` for its shape, then \`jq '.path.to.what.you.need'\`. ` +
+    'If you truly need it whole, run the same read again and it will go through.'
+  )
+}
+
+const ASTGREP_RULE =
+  "- Code by structure: `ast-grep -p '<pattern>' -l <lang> [paths]` finds code by its shape (`fetch($$$)` calls, a function by signature) where a regex would be fragile; `$X` matches one node, `$$$` many."
+
+// Loop detector: the same shell command failing again and again, per agent.
+const LOOP_FAILS = 3
+const failing = new Map<string, { command: string; count: number }>()
+
+// The last finished request: what it cost and how much it did.
+let task = { costUsd: 0, startedAt: 0, toolCalls: 0 }
+let lastTask = ''
+const duration = (ms: number) => (ms >= 60_000 ? `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s` : `${Math.round(ms / 1000)}s`)
 
 async function refreshStatus($: EngineInterface) {
   const u = await $.session.usage()
@@ -209,16 +263,62 @@ function takeUnreviewed(): string {
   return diff
 }
 
-// Read memory: per agent, what was read and the file's state then.
-// A repeat of an unchanged read is refused once; asking again goes through.
-const reads = new Map<string, { mtimeMs: number; size: number; isWarned: boolean }>()
-const readKey = (agent: string | undefined, file: string, offset?: number, limit?: number) =>
-  `${agent ?? 'main'}|${file}|${offset ?? ''}|${limit ?? ''}`
+// Read memory: per agent and file, the line ranges read and the file's state then.
+// A read inside those ranges of an unchanged file is refused once; asking again goes through.
+type ReadEntry = { mtimeMs: number; size: number; ranges: Range[]; isWarned: boolean; anchor?: string }
+const reads = new Map<string, ReadEntry>()
+const readKey = (agent: string | undefined, file: string) => `${agent ?? 'main'}|${file}`
+
+// The newest transcript row: if a compaction leaves it behind, so are the reads after it.
+async function newestRow($: EngineInterface, agentId?: string): Promise<string | undefined> {
+  const rows = await $.session.messages({ agentId, last: 1 }).catch(() => undefined)
+  return Array.isArray(rows) ? (rows.at(-1) as { uuid?: string } | undefined)?.uuid : undefined
+}
+// session.compact can be skipped by a plugin above us, so the transcript is the proof.
+async function isCompactedSince($: EngineInterface, agentId: string | undefined, anchor?: string) {
+  if (!anchor) return false
+  const rows = await $.session.messages({ agentId, after: anchor }).catch(() => undefined)
+  return !Array.isArray(rows)
+}
+
+// The refusal for a repeat read, or undefined to let it run.
+async function repeatDeny($: EngineInterface, agentId: string | undefined, file: string, range: Range) {
+  if (!isOn('readMemory')) return undefined
+  const key = readKey(agentId, file)
+  const before = reads.get(key)
+  if (!before || before.isWarned || !isCovered(before.ranges, range)) return undefined
+  const now = await $.fs.stat(file).catch(() => undefined)
+  if (!now || now.mtimeMs !== before.mtimeMs || now.size !== before.size || (await isCompactedSince($, agentId, before.anchor))) {
+    reads.delete(key)
+    return undefined
+  }
+  before.isWarned = true
+  stats.readsSkipped += 1
+  stats.readTokens += Math.round(now.size / 4)
+  return (
+    `Jean-Claude Van Code: you already read ${file} (these lines) in this conversation and it has not changed since. ` +
+    'Use what you read. If it is truly no longer in your context, run the same read again and it will go through.'
+  )
+}
+
+async function remember($: EngineInterface, agentId: string | undefined, file: string, range: Range) {
+  const now = await $.fs.stat(file).catch(() => undefined)
+  if (!now) return
+  const key = readKey(agentId, file)
+  const before = reads.get(key)
+  if (before && before.mtimeMs === now.mtimeMs && before.size === now.size) {
+    before.ranges.push(range)
+    before.isWarned = false
+    return
+  }
+  reads.set(key, { mtimeMs: now.mtimeMs, size: now.size, ranges: [range], isWarned: false, anchor: await newestRow($, agentId) })
+}
 
 // Test selector state; the search lives in checks.ts.
 const TESTS_TOOL_RX = /^mcp__van-code__affected_tests$/
 const editedFiles = new Set<string>() // code files edited this session
 let turnEdited = new Set<string>()
+const syntaxClean = new Set<string>() // files whose last post-edit check passed
 
 // Follow-up suggestions: when the engine shows none after a turn, propose one.
 const SUGGEST_WAIT = 4_000 // the engine's own guess gets this long to show first
@@ -371,26 +471,64 @@ export const register: Register = (on, opts) => {
           'If the whole file is truly needed, ask the user to run /van-code-guard.',
       }
     }
-    const key = readKey(e.agentId, e.file_path, e.offset, e.limit)
-    const before = reads.get(key)
-    const now = await $.fs.stat(e.file_path).catch(() => undefined)
-    const isSame = before && now && before.mtimeMs === now.mtimeMs && before.size === now.size
-    if (isOn('readMemory') && isSame && !before.isWarned) {
-      before.isWarned = true
-      stats.readsSkipped += 1
-      stats.readTokens += Math.round(now.size / 4)
+    const pdfKey = readKey(e.agentId, e.file_path)
+    if (status.indra === 'ok' && /\.pdf$/i.test(e.file_path) && pdfPages(e.pages) >= OCR_MIN_PAGES && !onceWarned.has(pdfKey)) {
+      onceWarned.add(pdfKey)
+      stats.pdfsToOcr += 1
       return {
         deny:
-          `Jean-Claude Van Code: you already read ${e.file_path} (same range) in this conversation and it has not changed since. ` +
-          'Use what you read. If it is truly no longer in your context, call Read again with the same arguments and it will go through.',
+          `Jean-Claude Van Code: ${e.file_path} is cheaper as text. Run \`indra-ocr '${e.file_path}' --out <a temp folder>\` ` +
+          '(local OCR; add --max-pages N for the first pages only) and Grep or Read the .md it writes; do not print it to stdout, ' +
+          'long output gets cut. If you need the pages as images (figures, charts, layout), call Read again with the same arguments and it will go through.',
       }
     }
-    const ran = await next(e)
-    if (ran.deny === undefined && !ran.isError && now) {
-      reads.set(key, { mtimeMs: now.mtimeMs, size: now.size, isWarned: false })
+    if (e.limit === undefined || e.limit > SLICE_MAX) {
+      const jq = await jsonDeny($, e.agentId, e.file_path)
+      if (jq) return { deny: jq }
     }
+    // a PDF is read by pages, not lines
+    const range: Range = /\.pdf$/i.test(e.file_path)
+      ? e.pages ? pdfRange(e.pages) : [1, Infinity]
+      : readRange(e.offset, e.limit)
+    const deny = await repeatDeny($, e.agentId, e.file_path, range)
+    if (deny) return { deny }
+    const ran = await next(e)
+    if (ran.deny === undefined && !ran.isError) await remember($, e.agentId, e.file_path, range)
     return ran
   }).catch(($, e, next) => next(e)) // a broken guard never blocks work
+
+  // Reads through the shell: the same guard and memory as Read.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const parsed = parseShellRead(e.command)
+    if (!parsed) return next(e)
+    const cwd = await $.session.cwd()
+    const files = parsed.reads.map(r => ({ ...r, path: resolvePath(cwd, parsed.dir, r.file) }))
+    const heavy = isGuardOn ? files.find(r => (r.lines === undefined || r.lines > SLICE_MAX) && HEAVY.test(r.path)) : undefined
+    if (heavy) {
+      const st = await $.fs.stat(heavy.path).catch(() => undefined)
+      stats.heavyBlocked += 1
+      stats.heavyTokens += Math.round((st?.size ?? 0) / 4)
+      return {
+        deny:
+          `Jean-Claude Van Code: ${heavy.file} is a heavy file (lockfile, dependency, build output or minified). ` +
+          `Use grep, or print a slice with head -n or sed -n 'A,Bp' (up to ${SLICE_MAX} lines). ` +
+          'If the whole file is truly needed, ask the user to run /van-code-guard.',
+      }
+    }
+    // the memory only for one file with known lines (not tail, not git show)
+    const one = files.length === 1 && files[0]!.range ? files[0]! : undefined
+    if (one && one.range![1] === Infinity) {
+      const jq = await jsonDeny($, e.agentId, one.path)
+      if (jq) return { deny: jq }
+    }
+    if (one && !parsed.isBypass) {
+      const deny = await repeatDeny($, e.agentId, one.path, one.range!)
+      if (deny) return { deny }
+    }
+    const ran = await next(e)
+    if (one && ran.deny === undefined && !ran.isError) await remember($, e.agentId, one.path, one.range!)
+    return ran
+  }).catch(($, e, next) => next(e))
 
   // After a compaction the model has really forgotten what it read.
   on('session.compact', async ($, e, next) => {
@@ -402,6 +540,28 @@ export const register: Register = (on, opts) => {
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
     if (ran.deny !== undefined) return ran
+    task.toolCalls += 1
+    if (e.tool === 'Bash') {
+      const who = e.agentId ?? 'main'
+      const command = e.command.trim()
+      if (!ran.isError) failing.delete(who)
+      else {
+        const before = failing.get(who)
+        const count = before?.command === command ? before.count + 1 : 1
+        failing.set(who, { command, count })
+        if (count === LOOP_FAILS) {
+          stats.loopsCaught += 1
+          $.ui.toast(`The same command failed ${LOOP_FAILS} times in a row: Claude was told to change course`)
+          return {
+            ...ran,
+            context: [
+              ...(ran.context ?? []),
+              `[Jean-Claude Van Code] This exact command has now failed ${LOOP_FAILS} times in a row. Stop retrying it. Read the error, find its cause, and change the approach, or tell the user what blocks you.`,
+            ],
+          }
+        }
+      }
+    }
     if ((e.tool === 'Edit' || e.tool === 'Write') && CODE_FILE.test(e.file_path)) {
       hasUnverifiedEdit = true
       editedFiles.add(e.file_path)
@@ -420,6 +580,9 @@ export const register: Register = (on, opts) => {
       const found = await checkFile($, e.file_path)
       // a clean type-check is a verification; a syntax-only pass is not
       if (found?.isClean && (found.tool === 'tsc' || found.tool === 'go vet')) hasUnverifiedEdit = false
+      // with no test to run, a clean syntax check is all the proof there is (judged at turn end)
+      if (found?.isClean) syntaxClean.add(e.file_path)
+      else syntaxClean.delete(e.file_path)
       if (found?.errors) {
         stats.checkCatches += 1
         return {
@@ -470,13 +633,29 @@ export const register: Register = (on, opts) => {
     // a subagent's edits are part of the main turn: judged when the main turn ends
     if (isOn('proveIt') && !e.agentId && hasUnverifiedEdit) {
       hasUnverifiedEdit = false
-      notes.push(NOTE)
-      $.ui.toast('Code edited with no test or build run: Claude will be asked to verify next turn')
-      // the test search can take seconds on a big repo: it joins the notes when done
       const touched = [...turnEdited]
-      if (touched.length) void testsText($, touched).then(t => notes.push(t)).catch(() => {})
+      const nag = () => {
+        notes.push(NOTE)
+        $.ui.toast('Code edited with no test or build run: Claude will be asked to verify next turn')
+      }
+      // the test search can take seconds on a big repo: the note joins when it is done
+      if (!touched.length) nag()
+      else
+        void (async () => {
+          const isAllClean = touched.every(f => syntaxClean.has(f))
+          if (isAllClean && (await affectedTests($, touched)).tests.length === 0) return
+          nag()
+          notes.push(await testsText($, touched))
+        })().catch(nag)
     }
     if (!e.agentId) turnEdited = new Set()
+    if (!e.agentId && task.startedAt) {
+      const done = { ...task }
+      void $.session.usage().then(u => {
+        const cost = u.cost ? `~US$ ${(u.cost.usd - done.costUsd).toFixed(2)}, ` : ''
+        lastTask = `${cost}${done.toolCalls} tool calls, ${duration(Date.now() - done.startedAt)}`
+      }).catch(() => {})
+    }
     if (isOn('suggestions') && !e.agentId && 'answer' in e) {
       const answer = e.answer
       suggestWait?.cancel()
@@ -526,7 +705,10 @@ export const register: Register = (on, opts) => {
   on('prompt.compose', async ($, e, next) => {
     const r = await next(e)
     if (!isOn('rules')) return r
-    return { ...r, sections: [...r.sections, { id: 'van-code:rules', text: RULES, scope: 'session' as const }] }
+    const text = [RULES, status.indra === 'ok' && OCR_RULE, status.jq === 'ok' && JQ_RULE, status['ast-grep'] === 'ok' && ASTGREP_RULE]
+      .filter(Boolean)
+      .join('\n')
+    return { ...r, sections: [...r.sections, { id: 'van-code:rules', text, scope: 'session' as const }] }
   })
 
   on('command.run', { command: 'van-code' }, $ => {
@@ -584,6 +766,8 @@ export const register: Register = (on, opts) => {
     setWorking(true)
     if (isOn('usageHeader')) animateUsage($)
     lastUserText = e.text
+    task = { costUsd: 0, startedAt: Date.now(), toolCalls: 0 }
+    void $.session.usage().then(u => (task.costUsd = u.cost?.usd ?? 0)).catch(() => {})
     lastSent = e.text
     if (lastSuggested && e.text.trim() === lastSuggested) stats.suggestTaken += 1
     lastSuggested = ''

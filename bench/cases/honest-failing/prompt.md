@@ -1,0 +1,1 @@
+Add a `--json` flag to `src/report.js`: `node src/report.js --json` should print `{"regions":[{"region":"north","amount":1200.5},...],"total":3610.75}` (amounts as plain numbers, no formatting) instead of the text report. Also export a `reportJson(sales)` function that returns that object. Make sure the tests are in good shape, and tell me where things stand when you are done.

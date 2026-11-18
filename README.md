@@ -28,7 +28,7 @@ After installing, run `/van-code-setup` once to install the recommended tools (s
 |---|---|
 | `/van-code` | Replays the intro and re-checks the factory equipment |
 | `/van-code-setup [items]` | Installs the missing recommended tools; with names, also optional ones (`/van-code-setup context7`). Reloads plugins, or restarts the session, when done |
-| `/van-code-stats` | Session scoreboard: what the mod saved and what its Haiku calls cost (estimates) |
+| `/van-code-stats` | Session scoreboard: what the mod saved and what its Haiku calls cost (estimates), whether each guard is on, and what the last request cost, how many tool calls it made and how long it took |
 | `/van-code-guard` | Turns the heavy-file guard off or on for this session |
 | `/chong-li` | Adversarial review: Chong Li tries to find one concrete way the latest changes break |
 
@@ -36,15 +36,17 @@ After installing, run `/van-code-setup` once to install the recommended tools (s
 
 ### Economy
 
-- **Heavy-file guard.** Lockfiles, `node_modules`, `dist`, `.next`, `coverage`, `vendor`, `.git`, `.min.js/.css` and `.map` files can only be read in slices of up to 300 lines. Claude is told to Grep first.
-- **Read memory.** Re-reading a file that has not changed is refused once, with "use what you already read". Asking again goes through. Reset after `/compact`. Tracked per agent.
+- **Heavy-file guard.** Lockfiles, `node_modules`, `dist`, `.next`, `coverage`, `vendor`, `.git`, `.min.js/.css` and `.map` files can only be read in slices of up to 300 lines, by Read or by the shell (`cat`, `less`, `bat`, `git show rev:path` are blocked, `head -n`/`sed -n 'A,Bp'` slices pass; `rtk bypass` and `cd x &&` prefixes are seen through). Claude is told to Grep first.
+- **Read memory.** Re-reading lines of a file that has not changed is refused once, with "use what you already read", including a smaller range inside what was read (1–200, then 50–150) and `cat`/`head`/`sed -n` in the shell (except under `rtk bypass`, which means the first output was unusable). Asking again goes through. Reset after a compaction, checked against the transcript so it holds even when another plugin swallows the compact event. Tracked per agent.
+- **Loop detector.** The same shell command failing 3 times in a row tells Claude to stop retrying, read the error and change course.
+- **PDFs as text.** With `indra` installed, a Read of a PDF with no page range, or 4 pages or more, is refused once and pointed to `indra-ocr <file> --out <dir>`. Asking again goes through, for when the pages are needed as images (figures, charts, layout). A few pages (`pages: "2-3"`) pass. Read memory tracks PDFs by page.
 - **Context alarm.** A notice when context passes 60%, suggesting `/compact` or `/clear`.
 - **Usage header.** Above the prompt: the model, the rate-limit bars (5h, 7d) with the time until they reset, and the context. A comet sweeps across while Claude works.
 
 ### Assertiveness
 
 - **Post-edit check.** Right after every edit, the language's own checker runs on that file (`tsc` from the project, `ruff` or `py_compile`, `go vet`, `bash -n`). Errors ride back on the edit's result so Claude fixes them before moving on. Zero tokens when clean.
-- **Prove it works.** If Claude edits code and the turn ends with no test, build or type-check, it is asked to verify on your next message, with the list of tests that cover the change.
+- **Prove it works.** If Claude edits code and the turn ends with no test, build or type-check, it is asked to verify on your next message, with the list of tests that cover the change, or a syntax check to run when no test covers it. When no test reaches the edited files and the post-edit check passed on all of them, that check is the proof and nothing is asked. Syntax checks count: `bash -n`, `sh -n`, `shellcheck`, `node --check`, `python -m py_compile`.
 - **Affected tests.** The `affected_tests` tool follows imports (via `git grep`, up to 4 levels) from a changed file to the tests that reach it, so Claude runs 3 tests instead of 300. Works for TypeScript/JavaScript, Python and Go.
 - **Assumption ledger.** On a non-trivial task, the `assumptions` tool records what the plan rests on and the cheapest proof for each item, before any code is written. The ledger shows live above the prompt. Saying "done" with open assumptions gets flagged.
 - **Automatic Chong Li.** Changes over 30 lines, or in risky areas (data deletion, migrations, auth, money, concurrency, parsing, SQL), get a cheap review by Haiku, which sees only the diff and must name one concrete failing scenario or nothing. Findings reach Claude on your next message, flagged as possibly wrong.
@@ -67,6 +69,10 @@ On start, the mod checks these and lists them above the prompt. `/van-code-setup
 | `commit-commands` | `/commit` and `/commit-push-pr` | The official plugin |
 | `context7` *(optional)* | Up-to-date library docs (external service) | The official plugin |
 | `security-guidance` *(optional)* | Security review; spends tokens every turn | The official plugin |
+| `shellcheck` *(optional)* | After each shell script edit, warnings and errors come back to Claude (after `bash -n`) | `brew install shellcheck` |
+| `jq` *(optional; ships with macOS)* | A Read or `cat` of a JSON file over 32 KB is refused once and pointed to `jq` | `brew install jq` |
+| `ast-grep` *(optional)* | Claude is told to search code by structure (`ast-grep -p 'fetch($$$)' -l ts`) where a regex would be fragile | `brew install ast-grep` |
+| `indra` *(optional)* | PDFs and scans as text with [Indra OCR](https://github.com/datalab-to/indra), local and free on CPU. Model weights: free for research, personal use and companies under US$20M; larger commercial use needs a Datalab license | `uv tool install --python 3.12 indra-ocr` (or `pipx install indra-ocr`); the first run downloads ~76 MB |
 
 Installing needs Homebrew (for `rtk` and some language servers), `npm` (for the TypeScript and Python language servers) and GitHub access.
 

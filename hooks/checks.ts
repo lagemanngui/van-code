@@ -71,7 +71,11 @@ export async function checkFile(
   }
   if (/\.(sh|bash)$/.test(file)) {
     const r = await exec(['bash', '-n', file], dirOf(file))
-    return r && { tool: 'bash -n', isClean: r.code === 0, errors: r.code === 0 ? undefined : r.out.slice(0, 2000) }
+    if (!r || r.code !== 0) return r && { tool: 'bash -n', isClean: false, errors: r.out.slice(0, 2000) }
+    // syntax is fine: shellcheck, when installed, finds the real bugs (warnings and up, no style notes)
+    const sc = await exec(['shellcheck', '-S', 'warning', '-f', 'gcc', file], dirOf(file))
+    if (!sc) return { tool: 'bash -n', isClean: true }
+    return { tool: 'shellcheck', isClean: sc.code === 0, errors: sc.code === 0 ? undefined : sc.out.slice(0, 2000) }
   }
   return undefined // shortcut: Rust and others unchecked; cargo check is too slow per edit.
 }
@@ -99,7 +103,7 @@ async function importersOf($: EngineInterface, root: string, file: string): Prom
 }
 
 // Tests reaching `files` (absolute) through imports, repo-relative.
-async function affectedTests($: EngineInterface, files: string[]): Promise<{ root: string; tests: string[] }> {
+export async function affectedTests($: EngineInterface, files: string[]): Promise<{ root: string; tests: string[] }> {
   const top = await run($, ['git', '-C', cwd, 'rev-parse', '--show-toplevel'])
   const root = top.ok ? top.out.trim() : cwd
   const tests = new Set<string>()
@@ -125,10 +129,18 @@ async function affectedTests($: EngineInterface, files: string[]): Promise<{ roo
   return { root, tests: [...tests].sort() }
 }
 
+const syntaxCheck = (f: string) =>
+  /\.(sh|bash)$/.test(f) ? `bash -n ${f}`
+  : /\.[cm]?js$/.test(f) ? `node --check ${f}`
+  : /\.py$/.test(f) ? `python -m py_compile ${f}`
+  : /\.tsx?$/.test(f) ? 'tsc --noEmit'
+  : `the compiler or linter on ${f}`
+
 export async function testsText($: EngineInterface, files: string[]): Promise<string> {
   if (files.length === 0) return 'No code files were edited in this session; pass files to check.'
   const { root, tests } = await affectedTests($, files)
-  if (tests.length === 0) return `No tests import ${files.join(', ')} (searched ${IMPORT_DEPTH} import levels under ${root}).`
+  if (tests.length === 0)
+    return `No tests import ${files.join(', ')} (searched ${IMPORT_DEPTH} import levels under ${root}). No test to write for this: a syntax check is enough, such as ${files.map(syntaxCheck).join('; ')}.`
   return `Tests that reach ${files.join(', ')} (repo root ${root}):\n${tests.join('\n')}\nRun only these with the project's test runner.`
 }
 
