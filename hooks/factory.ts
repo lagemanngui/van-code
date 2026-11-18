@@ -11,6 +11,9 @@ export const RECS = [
   { id: 'commit-commands', desc: '/commit e /commit-push-pr', isOptional: false },
   { id: 'context7', desc: 'up-to-date library docs (external service)', isOptional: true },
   { id: 'security-guidance', desc: 'security review; spends tokens every turn', isOptional: true },
+  { id: 'shellcheck', desc: 'finds real bugs in shell scripts after each edit', isOptional: true },
+  { id: 'jq', desc: 'slices big JSON instead of reading it whole', isOptional: true },
+  { id: 'ast-grep', desc: 'searches code by its structure, not by regex', isOptional: true },
   { id: 'indra', desc: 'PDFs and scans as text, local OCR (free for personal use and companies under US$20M)', isOptional: true },
 ] as const
 export type RecId = (typeof RECS)[number]['id']
@@ -26,6 +29,8 @@ const LANGS = [
   { name: 'Go', markers: ['go.mod'], plugin: 'gopls-lsp', bin: 'gopls', setup: ['brew', 'install', 'gopls'] },
 ]
 const OFFICIAL = 'claude-plugins-official'
+// Command-line tools: the binary is the id, Homebrew installs it.
+const BREW_TOOLS: readonly string[] = ['shellcheck', 'jq', 'ast-grep']
 
 export let cwd = ''
 export const setCwd = (dir: string) => {
@@ -91,6 +96,7 @@ async function check($: EngineInterface, id: RecId): Promise<Status> {
   }
   if (id === 'ponytail') return ok(isEnabled('ponytail@ponytail'))
   if (id === 'indra') return ok(await hasBin($, 'indra-ocr'))
+  if (BREW_TOOLS.includes(id)) return ok(await hasBin($, id))
   return ok(isEnabled(`${id}@${OFFICIAL}`))
 }
 
@@ -135,6 +141,9 @@ export async function install($: EngineInterface, id: RecId): Promise<string> {
       out.push(isOk ? `lsp ${l.name}: installed` : `lsp ${l.name}: installing ${l.plugin} failed`)
     }
     return out.join('\n')
+  }
+  if (BREW_TOOLS.includes(id)) {
+    return (await run($, ['brew', 'install', id], 600_000)).ok ? `${id}: installed` : `${id}: \`brew install ${id}\` failed (is Homebrew installed?)`
   }
   if (id === 'indra') {
     // uv brings its own Python 3.10+, which indra-ocr needs; macOS ships 3.9

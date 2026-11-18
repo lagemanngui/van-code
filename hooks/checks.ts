@@ -71,7 +71,11 @@ export async function checkFile(
   }
   if (/\.(sh|bash)$/.test(file)) {
     const r = await exec(['bash', '-n', file], dirOf(file))
-    return r && { tool: 'bash -n', isClean: r.code === 0, errors: r.code === 0 ? undefined : r.out.slice(0, 2000) }
+    if (!r || r.code !== 0) return r && { tool: 'bash -n', isClean: false, errors: r.out.slice(0, 2000) }
+    // syntax is fine: shellcheck, when installed, finds the real bugs (warnings and up, no style notes)
+    const sc = await exec(['shellcheck', '-S', 'warning', '-f', 'gcc', file], dirOf(file))
+    if (!sc) return { tool: 'bash -n', isClean: true }
+    return { tool: 'shellcheck', isClean: sc.code === 0, errors: sc.code === 0 ? undefined : sc.out.slice(0, 2000) }
   }
   return undefined // shortcut: Rust and others unchecked; cargo check is too slow per edit.
 }

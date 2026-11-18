@@ -30,7 +30,7 @@ After installing, run `/van-code-setup` once to install the recommended tools (s
 |---|---|
 | `/van-code` | Replays the intro and re-checks the factory equipment |
 | `/van-code-setup [items]` | Installs the missing recommended tools; with names, also optional ones (`/van-code-setup context7`). Reloads plugins, or restarts the session, when done |
-| `/van-code-stats` | Session scoreboard: what the mod saved and what its Haiku calls cost (estimates) |
+| `/van-code-stats` | Session scoreboard: what the mod saved and what its Haiku calls cost (estimates), whether each guard is on, and what the last request cost, how many tool calls it made and how long it took |
 | `/van-code-guard` | Turns the heavy-file guard off or on for this session |
 | `/chong-li` | Adversarial review: Chong Li tries to find one concrete way the latest changes break |
 
@@ -40,6 +40,7 @@ After installing, run `/van-code-setup` once to install the recommended tools (s
 
 - **Heavy-file guard.** Lockfiles, `node_modules`, `dist`, `.next`, `coverage`, `vendor`, `.git`, `.min.js/.css` and `.map` files can only be read in slices of up to 300 lines, by Read or by the shell (`cat`, `less`, `bat`, `git show rev:path` are blocked, `head -n`/`sed -n 'A,Bp'` slices pass; `rtk bypass` and `cd x &&` prefixes are seen through). Claude is told to Grep first.
 - **Read memory.** Re-reading lines of a file that has not changed is refused once, with "use what you already read", including a smaller range inside what was read (1–200, then 50–150) and `cat`/`head`/`sed -n` in the shell (except under `rtk bypass`, which means the first output was unusable). Asking again goes through. Reset after a compaction, checked against the transcript so it holds even when another plugin swallows the compact event. Tracked per agent.
+- **Loop detector.** The same shell command failing 3 times in a row tells Claude to stop retrying, read the error and change course.
 - **PDFs as text.** With `indra` installed, a Read of a PDF with no page range, or 4 pages or more, is refused once and pointed to `indra-ocr <file> --out <dir>`. Asking again goes through, for when the pages are needed as images (figures, charts, layout). A few pages (`pages: "2-3"`) pass. Read memory tracks PDFs by page.
 - **Context alarm.** A notice when context passes 60%, suggesting `/compact` or `/clear`.
 - **Usage header.** Above the prompt: the model, the rate-limit bars (5h, 7d) with the time until they reset, and the context. A comet sweeps across while Claude works.
@@ -70,6 +71,9 @@ On start, the mod checks these and lists them above the prompt. `/van-code-setup
 | `commit-commands` | `/commit` and `/commit-push-pr` | The official plugin |
 | `context7` *(optional)* | Up-to-date library docs (external service) | The official plugin |
 | `security-guidance` *(optional)* | Security review; spends tokens every turn | The official plugin |
+| `shellcheck` *(optional)* | After each shell script edit, warnings and errors come back to Claude (after `bash -n`) | `brew install shellcheck` |
+| `jq` *(optional; ships with macOS)* | A Read or `cat` of a JSON file over 32 KB is refused once and pointed to `jq` | `brew install jq` |
+| `ast-grep` *(optional)* | Claude is told to search code by structure (`ast-grep -p 'fetch($$$)' -l ts`) where a regex would be fragile | `brew install ast-grep` |
 | `indra` *(optional)* | PDFs and scans as text with [Indra OCR](https://github.com/datalab-to/indra), local and free on CPU. Model weights: free for research, personal use and companies under US$20M; larger commercial use needs a Datalab license | `uv tool install --python 3.12 indra-ocr` (or `pipx install indra-ocr`); the first run downloads ~76 MB |
 
 Installing needs Homebrew (for `rtk` and some language servers), `npm` (for the TypeScript and Python language servers) and GitHub access.

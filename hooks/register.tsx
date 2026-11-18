@@ -52,6 +52,8 @@ const stats = {
   readTokens: 0,
   heavyBlocked: 0,
   pdfsToOcr: 0,
+  jsonToJq: 0,
+  loopsCaught: 0,
   heavyTokens: 0,
   checkCatches: 0,
   chongRuns: 0,
@@ -76,6 +78,9 @@ function statsText() {
     `Repeat reads skipped: ${stats.readsSkipped} (~${k(stats.readTokens)} tokens) · read memory ${onOff(isOn('readMemory'))}`,
     `Heavy files blocked: ${stats.heavyBlocked} (~${k(stats.heavyTokens)} tokens) · guard ${onOff(isGuardOn)}`,
     `PDFs pointed to Indra OCR: ${stats.pdfsToOcr} · ${status.indra === 'ok' ? 'indra installed' : 'indra not installed'}`,
+    `Big JSON pointed to jq: ${stats.jsonToJq} · ${status.jq === 'ok' ? 'jq installed' : 'jq not installed'}`,
+    `Loops caught (the same command failing ${LOOP_FAILS} times in a row): ${stats.loopsCaught}`,
+    lastTask ? `Last request: ${lastTask}` : 'Last request: none finished yet',
     `Errors caught right after an edit: ${stats.checkCatches} (type or syntax errors the post-edit check found in an edited file · post-edit check ${onOff(isOn('postEditCheck'))})`,
     `Chong Li: ${stats.chongRuns} reviews, ${stats.chongFindings} findings`,
     `Mod suggestions: ${stats.suggestShown} shown, ${stats.suggestTaken} taken`,
@@ -157,7 +162,36 @@ const pdfRange = (pages: string): Range => {
   const [a, b = a] = pages.split('-').map(Number)
   return [a!, b!]
 }
-const pdfWarned = new Set<string>() // asked once per agent and file; insisting goes through
+const onceWarned = new Set<string>() // PDF and JSON redirects: once per agent and file; insisting goes through
+
+// Big JSON: sliced with jq rather than read whole.
+const JSON_MAX = 32_000 // bytes
+const JQ_RULE = '- JSON: slice a big JSON file with jq (`jq keys`, `jq \'.path\'`) instead of reading it whole.'
+async function jsonDeny($: EngineInterface, agentId: string | undefined, file: string) {
+  if (status.jq !== 'ok' || !/\.json$/i.test(file)) return undefined
+  const key = readKey(agentId, file)
+  if (onceWarned.has(key)) return undefined
+  const st = await $.fs.stat(file).catch(() => undefined)
+  if (!st || st.size <= JSON_MAX) return undefined
+  onceWarned.add(key)
+  stats.jsonToJq += 1
+  return (
+    `Jean-Claude Van Code: ${file} is ${Math.round(st.size / 1000)} KB of JSON. Slice it with jq: \`jq keys\` for its shape, then \`jq '.path.to.what.you.need'\`. ` +
+    'If you truly need it whole, run the same read again and it will go through.'
+  )
+}
+
+const ASTGREP_RULE =
+  "- Code by structure: `ast-grep -p '<pattern>' -l <lang> [paths]` finds code by its shape (`fetch($$$)` calls, a function by signature) where a regex would be fragile; `$X` matches one node, `$$$` many."
+
+// Loop detector: the same shell command failing again and again, per agent.
+const LOOP_FAILS = 3
+const failing = new Map<string, { command: string; count: number }>()
+
+// The last finished request: what it cost and how much it did.
+let task = { costUsd: 0, startedAt: 0, toolCalls: 0 }
+let lastTask = ''
+const duration = (ms: number) => (ms >= 60_000 ? `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s` : `${Math.round(ms / 1000)}s`)
 
 async function refreshStatus($: EngineInterface) {
   const u = await $.session.usage()
@@ -438,8 +472,8 @@ export const register: Register = (on, opts) => {
       }
     }
     const pdfKey = readKey(e.agentId, e.file_path)
-    if (status.indra === 'ok' && /\.pdf$/i.test(e.file_path) && pdfPages(e.pages) >= OCR_MIN_PAGES && !pdfWarned.has(pdfKey)) {
-      pdfWarned.add(pdfKey)
+    if (status.indra === 'ok' && /\.pdf$/i.test(e.file_path) && pdfPages(e.pages) >= OCR_MIN_PAGES && !onceWarned.has(pdfKey)) {
+      onceWarned.add(pdfKey)
       stats.pdfsToOcr += 1
       return {
         deny:
@@ -447,6 +481,10 @@ export const register: Register = (on, opts) => {
           '(local OCR; add --max-pages N for the first pages only) and Grep or Read the .md it writes; do not print it to stdout, ' +
           'long output gets cut. If you need the pages as images (figures, charts, layout), call Read again with the same arguments and it will go through.',
       }
+    }
+    if (e.limit === undefined || e.limit > SLICE_MAX) {
+      const jq = await jsonDeny($, e.agentId, e.file_path)
+      if (jq) return { deny: jq }
     }
     // a PDF is read by pages, not lines
     const range: Range = /\.pdf$/i.test(e.file_path)
@@ -479,6 +517,10 @@ export const register: Register = (on, opts) => {
     }
     // the memory only for one file with known lines (not tail, not git show)
     const one = files.length === 1 && files[0]!.range ? files[0]! : undefined
+    if (one && one.range![1] === Infinity) {
+      const jq = await jsonDeny($, e.agentId, one.path)
+      if (jq) return { deny: jq }
+    }
     if (one && !parsed.isBypass) {
       const deny = await repeatDeny($, e.agentId, one.path, one.range!)
       if (deny) return { deny }
@@ -498,6 +540,28 @@ export const register: Register = (on, opts) => {
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
     if (ran.deny !== undefined) return ran
+    task.toolCalls += 1
+    if (e.tool === 'Bash') {
+      const who = e.agentId ?? 'main'
+      const command = e.command.trim()
+      if (!ran.isError) failing.delete(who)
+      else {
+        const before = failing.get(who)
+        const count = before?.command === command ? before.count + 1 : 1
+        failing.set(who, { command, count })
+        if (count === LOOP_FAILS) {
+          stats.loopsCaught += 1
+          $.ui.toast(`The same command failed ${LOOP_FAILS} times in a row: Claude was told to change course`)
+          return {
+            ...ran,
+            context: [
+              ...(ran.context ?? []),
+              `[Jean-Claude Van Code] This exact command has now failed ${LOOP_FAILS} times in a row. Stop retrying it. Read the error, find its cause, and change the approach, or tell the user what blocks you.`,
+            ],
+          }
+        }
+      }
+    }
     if ((e.tool === 'Edit' || e.tool === 'Write') && CODE_FILE.test(e.file_path)) {
       hasUnverifiedEdit = true
       editedFiles.add(e.file_path)
@@ -585,6 +649,13 @@ export const register: Register = (on, opts) => {
         })().catch(nag)
     }
     if (!e.agentId) turnEdited = new Set()
+    if (!e.agentId && task.startedAt) {
+      const done = { ...task }
+      void $.session.usage().then(u => {
+        const cost = u.cost ? `~US$ ${(u.cost.usd - done.costUsd).toFixed(2)}, ` : ''
+        lastTask = `${cost}${done.toolCalls} tool calls, ${duration(Date.now() - done.startedAt)}`
+      }).catch(() => {})
+    }
     if (isOn('suggestions') && !e.agentId && 'answer' in e) {
       const answer = e.answer
       suggestWait?.cancel()
@@ -634,7 +705,9 @@ export const register: Register = (on, opts) => {
   on('prompt.compose', async ($, e, next) => {
     const r = await next(e)
     if (!isOn('rules')) return r
-    const text = status.indra === 'ok' ? `${RULES}\n${OCR_RULE}` : RULES
+    const text = [RULES, status.indra === 'ok' && OCR_RULE, status.jq === 'ok' && JQ_RULE, status['ast-grep'] === 'ok' && ASTGREP_RULE]
+      .filter(Boolean)
+      .join('\n')
     return { ...r, sections: [...r.sections, { id: 'van-code:rules', text, scope: 'session' as const }] }
   })
 
@@ -693,6 +766,8 @@ export const register: Register = (on, opts) => {
     setWorking(true)
     if (isOn('usageHeader')) animateUsage($)
     lastUserText = e.text
+    task = { costUsd: 0, startedAt: Date.now(), toolCalls: 0 }
+    void $.session.usage().then(u => (task.costUsd = u.cost?.usd ?? 0)).catch(() => {})
     lastSent = e.text
     if (lastSuggested && e.text.trim() === lastSuggested) stats.suggestTaken += 1
     lastSuggested = ''
