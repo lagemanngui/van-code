@@ -99,7 +99,7 @@ async function importersOf($: EngineInterface, root: string, file: string): Prom
 }
 
 // Tests reaching `files` (absolute) through imports, repo-relative.
-async function affectedTests($: EngineInterface, files: string[]): Promise<{ root: string; tests: string[] }> {
+export async function affectedTests($: EngineInterface, files: string[]): Promise<{ root: string; tests: string[] }> {
   const top = await run($, ['git', '-C', cwd, 'rev-parse', '--show-toplevel'])
   const root = top.ok ? top.out.trim() : cwd
   const tests = new Set<string>()
@@ -125,10 +125,18 @@ async function affectedTests($: EngineInterface, files: string[]): Promise<{ roo
   return { root, tests: [...tests].sort() }
 }
 
+const syntaxCheck = (f: string) =>
+  /\.(sh|bash)$/.test(f) ? `bash -n ${f}`
+  : /\.[cm]?js$/.test(f) ? `node --check ${f}`
+  : /\.py$/.test(f) ? `python -m py_compile ${f}`
+  : /\.tsx?$/.test(f) ? 'tsc --noEmit'
+  : `the compiler or linter on ${f}`
+
 export async function testsText($: EngineInterface, files: string[]): Promise<string> {
   if (files.length === 0) return 'No code files were edited in this session; pass files to check.'
   const { root, tests } = await affectedTests($, files)
-  if (tests.length === 0) return `No tests import ${files.join(', ')} (searched ${IMPORT_DEPTH} import levels under ${root}).`
+  if (tests.length === 0)
+    return `No tests import ${files.join(', ')} (searched ${IMPORT_DEPTH} import levels under ${root}). No test to write for this: a syntax check is enough, such as ${files.map(syntaxCheck).join('; ')}.`
   return `Tests that reach ${files.join(', ')} (repo root ${root}):\n${tests.join('\n')}\nRun only these with the project's test runner.`
 }
 

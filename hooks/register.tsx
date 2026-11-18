@@ -1,6 +1,7 @@
 import type { EngineInterface, ModelUsage, PluginOptions, Register } from 'claude-code'
 
-import { checkFile, testsText } from './checks.js'
+import { affectedTests, checkFile, testsText } from './checks.js'
+import { isCovered, parseShellRead, type Range, readRange, resolvePath } from './reads.js'
 import { checkAll, install, isLacking, langs, RECS, run, setCwd, status } from './factory.js'
 import { type Cell, cells, LAST, MAX_W, MIN_W, pixels } from './intro.js'
 import {
@@ -65,14 +66,15 @@ const countUsage = (u?: ModelUsage) => {
   stats.haikuIn += (u?.input_tokens ?? 0) + (u?.cache_creation_input_tokens ?? 0) + (u?.cache_read_input_tokens ?? 0)
   stats.haikuOut += u?.output_tokens ?? 0
 }
+const onOff = (b: boolean) => (b ? 'on' : 'off')
 const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
 
 function statsText() {
   return [
     'Jean-Claude Van Code · session scoreboard (token figures are estimates)',
-    `Repeat reads skipped: ${stats.readsSkipped} (~${k(stats.readTokens)} tokens)`,
-    `Heavy files blocked: ${stats.heavyBlocked} (~${k(stats.heavyTokens)} tokens)`,
-    `Errors caught right after an edit: ${stats.checkCatches}`,
+    `Repeat reads skipped: ${stats.readsSkipped} (~${k(stats.readTokens)} tokens) · read memory ${onOff(isOn('readMemory'))}`,
+    `Heavy files blocked: ${stats.heavyBlocked} (~${k(stats.heavyTokens)} tokens) · guard ${onOff(isGuardOn)}`,
+    `Errors caught right after an edit: ${stats.checkCatches} (type or syntax errors the post-edit check found in an edited file · post-edit check ${onOff(isOn('postEditCheck'))})`,
     `Chong Li: ${stats.chongRuns} reviews, ${stats.chongFindings} findings`,
     `Mod suggestions: ${stats.suggestShown} shown, ${stats.suggestTaken} taken`,
     `Haiku calls: ${k(stats.haikuIn)} input tokens, ${k(stats.haikuOut)} output tokens`,
@@ -88,7 +90,7 @@ let isGuardOn = true
 // "Prove it works": code edited in a turn with no test/build/type-check after.
 const CODE_FILE = /\.(ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|kt|swift|c|h|cpp|cs|php|scala|sh|vue|svelte|gd|lua|ex|exs|dart)$/
 const VERIFY =
-  /\b(test|tests|pytest|jest|vitest|mocha|tsc|build|lint|eslint|check|validate|cargo|go (test|build|vet)|make|gradle|mvn|swift (build|test)|xcodebuild|ruff|mypy|rspec)\b/
+  /\b(test|tests|pytest|jest|vitest|mocha|tsc|build|lint|eslint|check|validate|cargo|go (test|build|vet)|make|gradle|mvn|swift (build|test)|xcodebuild|ruff|mypy|rspec|shellcheck|py_compile)\b|\b(ba|z|da)?sh -n\b/
 let hasUnverifiedEdit = false
 // Notes the model reads with the person's next message.
 let notes: string[] = []
@@ -209,16 +211,62 @@ function takeUnreviewed(): string {
   return diff
 }
 
-// Read memory: per agent, what was read and the file's state then.
-// A repeat of an unchanged read is refused once; asking again goes through.
-const reads = new Map<string, { mtimeMs: number; size: number; isWarned: boolean }>()
-const readKey = (agent: string | undefined, file: string, offset?: number, limit?: number) =>
-  `${agent ?? 'main'}|${file}|${offset ?? ''}|${limit ?? ''}`
+// Read memory: per agent and file, the line ranges read and the file's state then.
+// A read inside those ranges of an unchanged file is refused once; asking again goes through.
+type ReadEntry = { mtimeMs: number; size: number; ranges: Range[]; isWarned: boolean; anchor?: string }
+const reads = new Map<string, ReadEntry>()
+const readKey = (agent: string | undefined, file: string) => `${agent ?? 'main'}|${file}`
+
+// The newest transcript row: if a compaction leaves it behind, so are the reads after it.
+async function newestRow($: EngineInterface, agentId?: string): Promise<string | undefined> {
+  const rows = await $.session.messages({ agentId, last: 1 }).catch(() => undefined)
+  return Array.isArray(rows) ? (rows.at(-1) as { uuid?: string } | undefined)?.uuid : undefined
+}
+// session.compact can be skipped by a plugin above us, so the transcript is the proof.
+async function isCompactedSince($: EngineInterface, agentId: string | undefined, anchor?: string) {
+  if (!anchor) return false
+  const rows = await $.session.messages({ agentId, after: anchor }).catch(() => undefined)
+  return !Array.isArray(rows)
+}
+
+// The refusal for a repeat read, or undefined to let it run.
+async function repeatDeny($: EngineInterface, agentId: string | undefined, file: string, range: Range) {
+  if (!isOn('readMemory')) return undefined
+  const key = readKey(agentId, file)
+  const before = reads.get(key)
+  if (!before || before.isWarned || !isCovered(before.ranges, range)) return undefined
+  const now = await $.fs.stat(file).catch(() => undefined)
+  if (!now || now.mtimeMs !== before.mtimeMs || now.size !== before.size || (await isCompactedSince($, agentId, before.anchor))) {
+    reads.delete(key)
+    return undefined
+  }
+  before.isWarned = true
+  stats.readsSkipped += 1
+  stats.readTokens += Math.round(now.size / 4)
+  return (
+    `Jean-Claude Van Code: you already read ${file} (these lines) in this conversation and it has not changed since. ` +
+    'Use what you read. If it is truly no longer in your context, run the same read again and it will go through.'
+  )
+}
+
+async function remember($: EngineInterface, agentId: string | undefined, file: string, range: Range) {
+  const now = await $.fs.stat(file).catch(() => undefined)
+  if (!now) return
+  const key = readKey(agentId, file)
+  const before = reads.get(key)
+  if (before && before.mtimeMs === now.mtimeMs && before.size === now.size) {
+    before.ranges.push(range)
+    before.isWarned = false
+    return
+  }
+  reads.set(key, { mtimeMs: now.mtimeMs, size: now.size, ranges: [range], isWarned: false, anchor: await newestRow($, agentId) })
+}
 
 // Test selector state; the search lives in checks.ts.
 const TESTS_TOOL_RX = /^mcp__van-code__affected_tests$/
 const editedFiles = new Set<string>() // code files edited this session
 let turnEdited = new Set<string>()
+const syntaxClean = new Set<string>() // files whose last post-edit check passed
 
 // Follow-up suggestions: when the engine shows none after a turn, propose one.
 const SUGGEST_WAIT = 4_000 // the engine's own guess gets this long to show first
@@ -371,26 +419,42 @@ export const register: Register = (on, opts) => {
           'If the whole file is truly needed, ask the user to run /van-code-guard.',
       }
     }
-    const key = readKey(e.agentId, e.file_path, e.offset, e.limit)
-    const before = reads.get(key)
-    const now = await $.fs.stat(e.file_path).catch(() => undefined)
-    const isSame = before && now && before.mtimeMs === now.mtimeMs && before.size === now.size
-    if (isOn('readMemory') && isSame && !before.isWarned) {
-      before.isWarned = true
-      stats.readsSkipped += 1
-      stats.readTokens += Math.round(now.size / 4)
-      return {
-        deny:
-          `Jean-Claude Van Code: you already read ${e.file_path} (same range) in this conversation and it has not changed since. ` +
-          'Use what you read. If it is truly no longer in your context, call Read again with the same arguments and it will go through.',
-      }
-    }
+    const range = readRange(e.offset, e.limit)
+    const deny = await repeatDeny($, e.agentId, e.file_path, range)
+    if (deny) return { deny }
     const ran = await next(e)
-    if (ran.deny === undefined && !ran.isError && now) {
-      reads.set(key, { mtimeMs: now.mtimeMs, size: now.size, isWarned: false })
-    }
+    if (ran.deny === undefined && !ran.isError) await remember($, e.agentId, e.file_path, range)
     return ran
   }).catch(($, e, next) => next(e)) // a broken guard never blocks work
+
+  // Reads through the shell: the same guard and memory as Read.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const parsed = parseShellRead(e.command)
+    if (!parsed) return next(e)
+    const cwd = await $.session.cwd()
+    const files = parsed.reads.map(r => ({ ...r, path: resolvePath(cwd, parsed.dir, r.file) }))
+    const heavy = isGuardOn ? files.find(r => (r.lines === undefined || r.lines > SLICE_MAX) && HEAVY.test(r.path)) : undefined
+    if (heavy) {
+      const st = await $.fs.stat(heavy.path).catch(() => undefined)
+      stats.heavyBlocked += 1
+      stats.heavyTokens += Math.round((st?.size ?? 0) / 4)
+      return {
+        deny:
+          `Jean-Claude Van Code: ${heavy.file} is a heavy file (lockfile, dependency, build output or minified). ` +
+          `Use grep, or print a slice with head -n or sed -n 'A,Bp' (up to ${SLICE_MAX} lines). ` +
+          'If the whole file is truly needed, ask the user to run /van-code-guard.',
+      }
+    }
+    // the memory only for one file with known lines (not tail, not git show)
+    const one = files.length === 1 && files[0]!.range ? files[0]! : undefined
+    if (one && !parsed.isBypass) {
+      const deny = await repeatDeny($, e.agentId, one.path, one.range!)
+      if (deny) return { deny }
+    }
+    const ran = await next(e)
+    if (one && ran.deny === undefined && !ran.isError) await remember($, e.agentId, one.path, one.range!)
+    return ran
+  }).catch(($, e, next) => next(e))
 
   // After a compaction the model has really forgotten what it read.
   on('session.compact', async ($, e, next) => {
@@ -420,6 +484,9 @@ export const register: Register = (on, opts) => {
       const found = await checkFile($, e.file_path)
       // a clean type-check is a verification; a syntax-only pass is not
       if (found?.isClean && (found.tool === 'tsc' || found.tool === 'go vet')) hasUnverifiedEdit = false
+      // with no test to run, a clean syntax check is all the proof there is (judged at turn end)
+      if (found?.isClean) syntaxClean.add(e.file_path)
+      else syntaxClean.delete(e.file_path)
       if (found?.errors) {
         stats.checkCatches += 1
         return {
@@ -470,11 +537,20 @@ export const register: Register = (on, opts) => {
     // a subagent's edits are part of the main turn: judged when the main turn ends
     if (isOn('proveIt') && !e.agentId && hasUnverifiedEdit) {
       hasUnverifiedEdit = false
-      notes.push(NOTE)
-      $.ui.toast('Code edited with no test or build run: Claude will be asked to verify next turn')
-      // the test search can take seconds on a big repo: it joins the notes when done
       const touched = [...turnEdited]
-      if (touched.length) void testsText($, touched).then(t => notes.push(t)).catch(() => {})
+      const nag = () => {
+        notes.push(NOTE)
+        $.ui.toast('Code edited with no test or build run: Claude will be asked to verify next turn')
+      }
+      // the test search can take seconds on a big repo: the note joins when it is done
+      if (!touched.length) nag()
+      else
+        void (async () => {
+          const isAllClean = touched.every(f => syntaxClean.has(f))
+          if (isAllClean && (await affectedTests($, touched)).tests.length === 0) return
+          nag()
+          notes.push(await testsText($, touched))
+        })().catch(nag)
     }
     if (!e.agentId) turnEdited = new Set()
     if (isOn('suggestions') && !e.agentId && 'answer' in e) {
