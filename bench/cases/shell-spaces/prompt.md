@@ -1,0 +1,1 @@
+`scripts/backup.sh` loses files: a note called `meeting notes.txt` was never backed up, and it also fails when the folder itself has a space in its name. Fix the script so it works for any file or folder name.

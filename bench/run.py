@@ -101,7 +101,7 @@ def parse_stream(stdout):
                 input_tokens=(u.get('input_tokens') or 0) + (u.get('cache_creation_input_tokens') or 0) + (u.get('cache_read_input_tokens') or 0),
                 output_tokens=u.get('output_tokens') or 0,
                 permission_denials=len(m.get('permission_denials') or []),
-                answer=(m.get('result') or '')[-500:],
+                answer=m.get('result') or '',
             )
     rec.update(tools=tools, tool_calls=sum(tools.values()), blocks=blocks, mod_blocks=len(blocks), tool_errors=tool_errors)
     return rec
@@ -126,6 +126,9 @@ def run_one(case, arm, i, args):
         rec.update(parse_stream(p.stdout))
         if 'cost_usd' not in rec:
             rec['error'] = 'no result: ' + p.stderr[-500:]
+        # the grader may judge what Claude said, not only what it did
+        (work / '.bench-answer.txt').write_text(rec.get('answer', ''))
+        rec['answer'] = rec.get('answer', '')[-500:]
         # hidden check: copied in only now, so Claude never saw it
         hidden = case / 'hidden'
         if hidden.exists():
