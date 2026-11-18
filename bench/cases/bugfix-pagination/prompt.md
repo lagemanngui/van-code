@@ -1,0 +1,1 @@
+Users of the orders API report that the last orders never show up: with 23 orders and 10 per page, `listOrders` says there are 2 pages and asking for page 3 throws. Fix it. An empty list should have 0 pages, and asking for a page past the end should return an empty list instead of throwing.
