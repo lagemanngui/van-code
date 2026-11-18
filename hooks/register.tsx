@@ -51,6 +51,7 @@ const stats = {
   readsSkipped: 0,
   readTokens: 0,
   heavyBlocked: 0,
+  pdfsToOcr: 0,
   heavyTokens: 0,
   checkCatches: 0,
   chongRuns: 0,
@@ -74,6 +75,7 @@ function statsText() {
     'Jean-Claude Van Code · session scoreboard (token figures are estimates)',
     `Repeat reads skipped: ${stats.readsSkipped} (~${k(stats.readTokens)} tokens) · read memory ${onOff(isOn('readMemory'))}`,
     `Heavy files blocked: ${stats.heavyBlocked} (~${k(stats.heavyTokens)} tokens) · guard ${onOff(isGuardOn)}`,
+    `PDFs pointed to Indra OCR: ${stats.pdfsToOcr} · ${status.indra === 'ok' ? 'indra installed' : 'indra not installed'}`,
     `Errors caught right after an edit: ${stats.checkCatches} (type or syntax errors the post-edit check found in an edited file · post-edit check ${onOff(isOn('postEditCheck'))})`,
     `Chong Li: ${stats.chongRuns} reviews, ${stats.chongFindings} findings`,
     `Mod suggestions: ${stats.suggestShown} shown, ${stats.suggestTaken} taken`,
@@ -140,6 +142,22 @@ const RULES = `# Jean-Claude Van Code
 - Proven: before calling a code change done, run the relevant test, build or type-check and report the result.
 - Tests: to verify a change, call affected_tests and run only those tests, not the whole suite.
 - Assumptions: on a non-trivial task, record what the plan rests on in the assumptions tool and verify each before writing code.`
+
+const OCR_RULE =
+  '- Documents: to read a PDF or scan as text, run `indra-ocr <file> --out <dir>` (local, free) and Grep or Read the .md it writes; Read the PDF itself only for figures, charts or layout, or a few pages (`pages`).'
+
+// PDFs: more than this many pages as images costs more than Indra's text.
+const OCR_MIN_PAGES = 4
+const pdfPages = (pages?: string) => {
+  if (!pages) return Infinity
+  const [a, b] = pdfRange(pages)
+  return b - a + 1
+}
+const pdfRange = (pages: string): Range => {
+  const [a, b = a] = pages.split('-').map(Number)
+  return [a!, b!]
+}
+const pdfWarned = new Set<string>() // asked once per agent and file; insisting goes through
 
 async function refreshStatus($: EngineInterface) {
   const u = await $.session.usage()
@@ -419,7 +437,21 @@ export const register: Register = (on, opts) => {
           'If the whole file is truly needed, ask the user to run /van-code-guard.',
       }
     }
-    const range = readRange(e.offset, e.limit)
+    const pdfKey = readKey(e.agentId, e.file_path)
+    if (status.indra === 'ok' && /\.pdf$/i.test(e.file_path) && pdfPages(e.pages) >= OCR_MIN_PAGES && !pdfWarned.has(pdfKey)) {
+      pdfWarned.add(pdfKey)
+      stats.pdfsToOcr += 1
+      return {
+        deny:
+          `Jean-Claude Van Code: ${e.file_path} is cheaper as text. Run \`indra-ocr '${e.file_path}' --out <a temp folder>\` ` +
+          '(local OCR; add --max-pages N for the first pages only) and Grep or Read the .md it writes; do not print it to stdout, ' +
+          'long output gets cut. If you need the pages as images (figures, charts, layout), call Read again with the same arguments and it will go through.',
+      }
+    }
+    // a PDF is read by pages, not lines
+    const range: Range = /\.pdf$/i.test(e.file_path)
+      ? e.pages ? pdfRange(e.pages) : [1, Infinity]
+      : readRange(e.offset, e.limit)
     const deny = await repeatDeny($, e.agentId, e.file_path, range)
     if (deny) return { deny }
     const ran = await next(e)
@@ -602,7 +634,8 @@ export const register: Register = (on, opts) => {
   on('prompt.compose', async ($, e, next) => {
     const r = await next(e)
     if (!isOn('rules')) return r
-    return { ...r, sections: [...r.sections, { id: 'van-code:rules', text: RULES, scope: 'session' as const }] }
+    const text = status.indra === 'ok' ? `${RULES}\n${OCR_RULE}` : RULES
+    return { ...r, sections: [...r.sections, { id: 'van-code:rules', text, scope: 'session' as const }] }
   })
 
   on('command.run', { command: 'van-code' }, $ => {

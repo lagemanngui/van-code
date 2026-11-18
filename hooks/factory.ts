@@ -11,6 +11,7 @@ export const RECS = [
   { id: 'commit-commands', desc: '/commit e /commit-push-pr', isOptional: false },
   { id: 'context7', desc: 'up-to-date library docs (external service)', isOptional: true },
   { id: 'security-guidance', desc: 'security review; spends tokens every turn', isOptional: true },
+  { id: 'indra', desc: 'PDFs and scans as text, local OCR (free for personal use and companies under US$20M)', isOptional: true },
 ] as const
 export type RecId = (typeof RECS)[number]['id']
 
@@ -89,6 +90,7 @@ async function check($: EngineInterface, id: RecId): Promise<Status> {
     return ok(each.every(Boolean))
   }
   if (id === 'ponytail') return ok(isEnabled('ponytail@ponytail'))
+  if (id === 'indra') return ok(await hasBin($, 'indra-ocr'))
   return ok(isEnabled(`${id}@${OFFICIAL}`))
 }
 
@@ -133,6 +135,19 @@ export async function install($: EngineInterface, id: RecId): Promise<string> {
       out.push(isOk ? `lsp ${l.name}: installed` : `lsp ${l.name}: installing ${l.plugin} failed`)
     }
     return out.join('\n')
+  }
+  if (id === 'indra') {
+    // uv brings its own Python 3.10+, which indra-ocr needs; macOS ships 3.9
+    const argv = (await hasBin($, 'uv'))
+      ? ['uv', 'tool', 'install', '--python', '3.12', 'indra-ocr']
+      : (await hasBin($, 'pipx'))
+        ? ['pipx', 'install', 'indra-ocr']
+        : undefined
+    if (!argv) return 'indra: needs uv (`brew install uv`) or pipx'
+    if (!(await run($, argv, 600_000)).ok) return `indra: \`${argv.join(' ')}\` failed`
+    return (await hasBin($, 'indra-ocr'))
+      ? 'indra: installed (the first run downloads ~76 MB of models)'
+      : 'indra: installed, but indra-ocr is not on PATH: run `uv tool update-shell` (or `pipx ensurepath`) and restart the shell'
   }
   if (id === 'ponytail') {
     const isOk = await installPlugin($, 'ponytail@ponytail', 'DietrichGebert/ponytail')
