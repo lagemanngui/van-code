@@ -1,9 +1,10 @@
 import type { EngineInterface, ModelUsage, PluginOptions, Register, SessionMessage, ToolResultSummary } from 'claude-code'
 
 import { affectedTests, allTests, checkFile, namedTests, reachesAny, testsText } from './checks.js'
+import { cardKind, cardNote } from './card.js'
 import { judgeInfra } from './infra.js'
 import { isCovered, parseShellRead, type Range, readRange, resolvePath } from './reads.js'
-import { checkAll, cwd, infra, install, isLacking, langs, RECS, roots, run, setCwd, status } from './factory.js'
+import { checkAll, cwd, hasWeb, infra, install, isLacking, langs, RECS, roots, run, setCwd, status } from './factory.js'
 import { type Cell, cells, LAST, MAX_W, MIN_W, pixels } from './intro.js'
 import {
   animateUsage,
@@ -68,6 +69,8 @@ const stats = {
   proofGaps: 0,
   trimmedTokens: 0,
   stuckChecks: 0,
+  uiSuggested: 0,
+  cards: 0,
 }
 
 // Infra guard: live-infra changes wait for a preview (plan, diff, dry run) of their family.
@@ -138,6 +141,8 @@ function statsText() {
     `Loops caught (the same command failing ${LOOP_FAILS} times in a row): ${stats.loopsCaught}`,
     `Infra changes held for a preview: ${stats.infraBlocked} · infra guard ${onOff(isOn('infraGuard'))}`,
     `Test runs that missed the edited code: ${stats.proofGaps} · prove it ${onOff(isOn('proveIt'))}`,
+    `Cards read as a story, bug or task and planned first: ${stats.cards} · card plan ${onOff(isOn('cardPlan'))}`,
+    `UI changes Claude was asked to check in a browser: ${stats.uiSuggested} · ${status.playwright === 'ok' ? 'playwright-cli installed' : status.playwright === 'none' ? 'no web frontend here' : 'playwright-cli not installed'}`,
     `Old tool output cut before compactions: ~${k(stats.trimmedTokens)} tokens the summarizer did not read · compaction trim ${onOff(isOn('compactTrim'))}`,
     `Restored after a compaction: ${stats.restores} · compaction restore ${onOff(isOn('compactRestore'))}`,
     lastTask ? `Last request: ${lastTask}` : 'Last request: none finished yet',
@@ -161,7 +166,7 @@ let isGuardOn = true
 // "Prove it works": code edited in a turn with no test/build/type-check after.
 const CODE_FILE = /\.(ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|kt|swift|c|h|cpp|cs|php|scala|sh|vue|svelte|gd|lua|ex|exs|dart)$/
 const VERIFY =
-  /\b(test|tests|pytest|jest|vitest|mocha|tsc|build|lint|eslint|check|validate|cargo|go (test|build|vet)|make|gradle|mvn|swift (build|test)|xcodebuild|ruff|mypy|rspec|shellcheck|py_compile)\b|\b(ba|z|da)?sh -n\b/
+  /\b(test|tests|pytest|jest|vitest|mocha|tsc|build|lint|eslint|check|validate|cargo|go (test|build|vet)|make|gradle|mvn|swift (build|test)|xcodebuild|ruff|mypy|rspec|shellcheck|py_compile|playwright)\b|\b(ba|z|da)?sh -n\b/
 // Commands that only read or record: `cat a.test.ts` or `git commit -m "tests"` verify nothing.
 const READERS = new Set(['cat', 'head', 'tail', 'less', 'more', 'bat', 'sed', 'awk', 'grep', 'rg', 'ag', 'ls', 'find', 'fd', 'wc', 'diff', 'echo', 'printf', 'git', 'jq', 'open', 'code', 'vim', 'nano'])
 // The parts of a shell command that run a test, build or check.
@@ -290,6 +295,17 @@ async function jsonDeny($: EngineInterface, agentId: string | undefined, file: s
     'If you truly need it whole, run the same read again and it will go through.'
   )
 }
+
+const PLAYWRIGHT_RULE =
+  '- UI: verify a user-facing web change by using it as a user would, with `playwright-cli` (open the page, snapshot, click, fill, screenshot; the playwright-cli skill has the details), and say what you saw. A flow worth keeping becomes a Playwright test.'
+
+// UI suggestion: a user-facing change no browser ever saw. Asked once per file, in a repo with a web frontend.
+const UI_FILE = /\.(tsx|jsx|vue|svelte|astro|html|css|scss)$/
+const BROWSER = /\bplaywright\b/
+let turnUi = new Set<string>() // UI files edited this turn
+let ranBrowser = false // a playwright command or tool ran this turn
+const uiAsked = new Set<string>()
+let isPlaywrightOffered = false
 
 const ASTGREP_RULE =
   "- Code by structure: `ast-grep -p '<pattern>' -l <lang> [paths]` finds code by its shape (`fetch($$$)` calls, a function by signature) where a regex would be fragile; `$X` matches one node, `$$$` many."
@@ -780,6 +796,9 @@ export const register: Register = (on, opts) => {
       turnEdited.add(e.file_path)
     }
     if ((e.tool === 'Edit' || e.tool === 'Write') && !ran.isError && touchTargets(e.file_path)) $.ui.invalidate('ui.render')
+    if ((e.tool === 'Edit' || e.tool === 'Write') && !ran.isError && UI_FILE.test(e.file_path)) turnUi.add(e.file_path)
+    // the official playwright plugin's MCP tools count as much as playwright-cli
+    if ((e.tool === 'Bash' && BROWSER.test(e.command)) || /playwright/i.test(e.tool)) ranBrowser = true
     if (e.tool === 'Edit' && CODE_FILE.test(e.file_path)) {
       const minus = e.old_string.split('\n').map(l => `- ${l}`).join('\n')
       const plus = e.new_string.split('\n').map(l => `+ ${l}`).join('\n')
@@ -895,6 +914,23 @@ export const register: Register = (on, opts) => {
           notes.push(await testsText($, touched, groups))
         })().catch(nag)
     }
+    if (isOn('proveIt') && !e.agentId && hasWeb && !ranBrowser) {
+      const fresh = [...turnUi].filter(f => !uiAsked.has(f))
+      if (fresh.length > 0 && status.playwright === 'ok') {
+        for (const f of fresh) uiAsked.add(f)
+        stats.uiSuggested += 1
+        notes.push(
+          `[Jean-Claude Van Code] In the previous turn you changed user-facing code (${fresh.join(', ')}) and no browser saw it. If the change alters what a user sees or does, run the app and walk through that flow with playwright-cli as a user would, then say what you saw; if it does not, say so in one line.`,
+        )
+      } else if (fresh.length > 0 && status.playwright === 'missing' && !isPlaywrightOffered) {
+        isPlaywrightOffered = true
+        $.ui.toast('UI change with no browser check: /van-code-setup playwright lets Claude test it like a user')
+      }
+    }
+    if (!e.agentId) {
+      turnUi = new Set()
+      ranBrowser = false
+    }
     if (!e.agentId) turnEdited = new Set()
     if (!e.agentId && task.startedAt) {
       const done = { ...task }
@@ -971,7 +1007,7 @@ export const register: Register = (on, opts) => {
   on('prompt.compose', async ($, e, next) => {
     const r = await next(e)
     if (!isOn('rules')) return r
-    const text = [RULES, status.indra === 'ok' && OCR_RULE, status.jq === 'ok' && JQ_RULE, status['ast-grep'] === 'ok' && ASTGREP_RULE]
+    const text = [RULES, status.indra === 'ok' && OCR_RULE, status.jq === 'ok' && JQ_RULE, status['ast-grep'] === 'ok' && ASTGREP_RULE, status.playwright === 'ok' && PLAYWRIGHT_RULE]
       .filter(Boolean)
       .join('\n')
     return { ...r, sections: [...r.sections, { id: 'van-code:rules', text, scope: 'session' as const }] }
@@ -1032,6 +1068,13 @@ export const register: Register = (on, opts) => {
     setWorking(true)
     if (isOn('usageHeader')) animateUsage($)
     lastUserText = e.text
+    // a pasted story, bug or task card: plan it before coding (the note rides with the card itself)
+    const kind = isOn('cardPlan') ? cardKind(e.text) : undefined
+    if (kind) {
+      notes.push(cardNote(kind, status.playwright === 'ok'))
+      stats.cards += 1
+      $.ui.toast(`Read as a ${kind === 'task' ? 'task card' : kind === 'bug' ? 'bug report' : 'user story'}: Claude will plan it before coding`)
+    }
     if (e.text.trim()) asks.push(e.text.trim())
     if (restore) {
       notes.push(restore)
@@ -1182,6 +1225,7 @@ export const register: Register = (on, opts) => {
               : r.id === 'lsp' && st === 'none' ? 'no known language in this folder'
               : r.id === 'infra' && infra.length > 0 ? `${r.desc} (${infra.map(i => i.name).join(', ')})`
               : r.id === 'infra' && st === 'none' ? 'no Terraform, Helm or Kubernetes files in this repo'
+              : r.id === 'playwright' && st === 'none' ? 'no web frontend in this folder'
               : r.desc
             const tail = isOffer ? ` · optional: /van-code-setup ${r.id}` : st === 'missing' ? ' (missing)' : ''
             return (

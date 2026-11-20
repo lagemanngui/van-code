@@ -75,6 +75,12 @@
       "description": "Before a compaction, cuts old tool output over 2,000 characters to its first 600, so the summary is cheaper and about decisions, not dumps. The newest 12 messages and errors stay whole.",
       "default": true
     },
+    "cardPlan": {
+      "type": "boolean",
+      "title": "Card plan",
+      "description": "When a message reads as a pasted user story, bug report or task card, Claude is told to list its acceptance criteria as targets, ask only what is ambiguous, and reproduce a bug before fixing it.",
+      "default": true
+    },
     "usageHeader": {
       "type": "boolean",
       "title": "Usage header",

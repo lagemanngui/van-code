@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { detectProjects, infra, langs, roots, setCwd } from './factory.js'
+import { detectProjects, hasWeb, infra, langs, roots, setCwd } from './factory.js'
 
 test('a folder of side-by-side repos: languages and infra are found one level down', async () => {
   setCwd('/w') // not a repo itself: api/ and web/ are; docs/ is a plain folder
@@ -14,6 +14,7 @@ test('a folder of side-by-side repos: languages and infra are found one level do
         { name: '.cache', kind: 'dir', size: 0 },
         { name: 'notes.md', kind: 'file', size: 1 },
       ],
+      read: async (p: string) => (p === '/w/web/package.json' ? '{"dependencies": {"react": "^19"}}' : Promise.reject(new Error('ENOENT'))),
       exists: async (p: string) => ['/w/api/.git', '/w/web/.git'].includes(p),
       stat: async (p: string) => {
         if (p === '/w/api/go.mod') return { kind: 'file', size: 1, mtimeMs: 1, isLink: false }
@@ -35,5 +36,6 @@ test('a folder of side-by-side repos: languages and infra are found one level do
   expect(roots).toEqual(['/w', '/w/api', '/w/web'])
   expect(langs.map(l => l.name)).toEqual(['Go']) // go.mod in /w/api
   expect(infra.map(i => i.name)).toEqual(['Helm']) // Chart.yaml in /w/web
+  expect(hasWeb).toBe(true) // react in /w/web
   expect(ran.some(a => a.includes('/w/docs'))).toBe(false)
 })

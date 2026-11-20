@@ -15,6 +15,7 @@ export const RECS = [
   { id: 'jq', desc: 'slices big JSON instead of reading it whole', isOptional: true },
   { id: 'ast-grep', desc: 'searches code by its structure, not by regex', isOptional: true },
   { id: 'infra', desc: 'checks Terraform, Helm and Kubernetes files right after each edit', isOptional: true },
+  { id: 'playwright', desc: 'tests web UI like a user would: Microsoft playwright-cli and its official skill', isOptional: true },
   { id: 'indra', desc: 'PDFs and scans as text, local OCR (free for personal use and companies under US$20M)', isOptional: true },
 ] as const
 export type RecId = (typeof RECS)[number]['id']
@@ -94,7 +95,26 @@ export async function findRoots($: EngineInterface): Promise<string[]> {
 // What the folder holds: its repos, their languages and their infra files.
 export async function detectProjects($: EngineInterface) {
   roots = await findRoots($)
-  await Promise.all([detectLangs($), detectInfra($)])
+  await Promise.all([detectLangs($), detectInfra($), detectWeb($)])
+}
+
+// A web frontend: a UI framework in a package.json, or an index.html at a root.
+const WEB_DEPS = /"(react|react-dom|vue|svelte|@sveltejs\/kit|next|nuxt|@angular\/core|solid-js|astro|@remix-run\/react|vite|preact|lit)"\s*:/
+export let hasWeb = false
+async function detectWeb($: EngineInterface) {
+  const each = await Promise.all(
+    roots.map(async r => WEB_DEPS.test(await $.fs.read(`${r}/package.json`).catch(() => '')) || (await $.fs.exists(`${r}/index.html`).catch(() => false))),
+  )
+  hasWeb = each.some(Boolean)
+}
+
+// playwright-cli writes its skill to <cwd>/.claude/skills/playwright-cli (read in its skillCheck.js):
+// installed from HOME it is the user's skill, in every project.
+const PW_SKILL = '.claude/skills/playwright-cli/SKILL.md'
+async function hasPlaywrightSkill($: EngineInterface) {
+  const home = await $.env.get('HOME')
+  const dirs = [home, ...roots].filter(Boolean)
+  return (await Promise.all(dirs.map(d => $.fs.exists(`${d}/${PW_SKILL}`).catch(() => false)))).some(Boolean)
 }
 
 async function detectLangs($: EngineInterface) {
@@ -134,6 +154,10 @@ async function check($: EngineInterface, id: RecId): Promise<Status> {
   }
   if (id === 'ponytail') return ok(isEnabled('ponytail@ponytail'))
   if (id === 'indra') return ok(await hasBin($, 'indra-ocr'))
+  if (id === 'playwright') {
+    if (!hasWeb) return 'none'
+    return ok((await hasBin($, 'playwright-cli')) && (await hasPlaywrightSkill($)))
+  }
   if (id === 'infra') {
     if (infra.length === 0) return 'none'
     const each = await Promise.all(infra.map(async i => (await Promise.all(i.bins.map(b => hasBin($, b)))).some(Boolean)))
@@ -184,6 +208,18 @@ export async function install($: EngineInterface, id: RecId): Promise<string> {
       out.push(isOk ? `lsp ${l.name}: installed` : `lsp ${l.name}: installing ${l.plugin} failed`)
     }
     return out.join('\n')
+  }
+  if (id === 'playwright') {
+    if (!(await hasBin($, 'playwright-cli')) && !(await run($, ['npm', 'install', '-g', '@playwright/cli@latest'], 600_000)).ok)
+      return 'playwright: `npm install -g @playwright/cli@latest` failed (needs Node 20+)'
+    const home = await $.env.get('HOME')
+    try {
+      const r = await $.process.run(['playwright-cli', 'install', '--skills'], { cwd: home, timeoutMs: 180_000 })
+      if (r.exitCode !== 0) return 'playwright: installed, but `playwright-cli install --skills` failed'
+    } catch {
+      return 'playwright: installed, but `playwright-cli install --skills` failed'
+    }
+    return 'playwright: playwright-cli and its skill installed (it drives your installed Chrome; without one, run `playwright-cli install-browser`)'
   }
   if (id === 'infra') {
     const out: string[] = []
