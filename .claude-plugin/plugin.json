@@ -1,6 +1,6 @@
 {
   "name": "van-code",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Jean-Claude Van Code: a flying-kick intro plus guards, checks and cheap reviews for assertive, economical coding with Claude Code",
   "userConfig": {
     "intro": {
