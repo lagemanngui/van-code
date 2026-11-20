@@ -1216,7 +1216,7 @@ export const register: Register = (on, opts) => {
     // a pasted story, bug or task card: plan it before coding (the note rides with the card itself)
     const kind = isOn('cardPlan') ? cardKind(e.text) : undefined
     if (kind) {
-      notes.push(cardNote(kind, status.playwright === 'ok'))
+      notes.push(cardNote(kind, status.playwright === 'ok', status['diagnosing-bugs'] === 'ok'))
       stats.cards += 1
       $.ui.toast(`Read as a ${kind === 'task' ? 'task card' : kind === 'bug' ? 'bug report' : 'user story'}: Claude will plan it before coding`)
     }

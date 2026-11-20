@@ -18,6 +18,7 @@ export const RECS = [
   { id: 'ast-grep', desc: 'searches code by its structure, not by regex', isOptional: true },
   { id: 'infra', desc: 'checks Terraform, Helm and Kubernetes files right after each edit', isOptional: true },
   { id: 'playwright', desc: 'tests web UI like a user would: Microsoft playwright-cli and its official skill', isOptional: true },
+  { id: 'diagnosing-bugs', desc: 'a diagnosis loop for hard bugs: a failing repro first, then ranked hypotheses (Matt Pocock skill)', isOptional: true },
   { id: 'kitty', desc: 'terminal with clickable file links, inline images and Shift+Enter (not made the default)', isOptional: true },
   { id: 'indra', desc: 'PDFs and scans as text, local OCR (free for personal use and companies under US$20M)', isOptional: true },
 ] as const
@@ -118,6 +119,18 @@ async function hasPlaywrightSkill($: EngineInterface) {
   const home = await $.env.get('HOME')
   const dirs = [home, ...roots].filter(Boolean)
   return (await Promise.all(dirs.map(d => $.fs.exists(`${d}/${PW_SKILL}`).catch(() => false)))).some(Boolean)
+}
+
+// diagnosing-bugs from mattpocock/skills (MIT), installed as the user's own skill for every project.
+const DIAG_SKILL = '.claude/skills/diagnosing-bugs/SKILL.md'
+const DIAG_INSTALL = ['npx', '-y', 'skills', 'add', 'https://github.com/mattpocock/skills', '--skill', 'diagnosing-bugs', '-g', '-y']
+async function hasDiagSkill($: EngineInterface) {
+  try {
+    const home = await $.env.get('HOME')
+    return !!home && (await $.fs.exists(`${home}/${DIAG_SKILL}`))
+  } catch {
+    return false
+  }
 }
 
 async function detectLangs($: EngineInterface) {
@@ -227,6 +240,7 @@ async function check($: EngineInterface, id: RecId): Promise<Status> {
     if (platform === 'windows' || platform === 'unknown') return 'none' // kitty has no Windows build
     return ok(await hasKitty($))
   }
+  if (id === 'diagnosing-bugs') return ok(await hasDiagSkill($))
   if (id === 'playwright') {
     if (!hasWeb) return 'none'
     return ok((await hasBin($, 'playwright-cli')) && (await hasPlaywrightSkill($)))
@@ -281,6 +295,10 @@ export async function install($: EngineInterface, id: RecId): Promise<string> {
       out.push(isOk ? `lsp ${l.name}: installed` : `lsp ${l.name}: installing ${l.plugin} failed`)
     }
     return out.join('\n')
+  }
+  if (id === 'diagnosing-bugs') {
+    const r = await run($, DIAG_INSTALL, 300_000)
+    return r.ok ? 'diagnosing-bugs: skill installed in ~/.claude/skills' : `diagnosing-bugs: \`${DIAG_INSTALL.join(' ')}\` failed`
   }
   if (id === 'playwright') {
     if (!(await hasBin($, 'playwright-cli')) && !(await run($, ['npm', 'install', '-g', '@playwright/cli@latest'], 600_000)).ok)

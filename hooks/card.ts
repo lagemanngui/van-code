@@ -35,11 +35,12 @@ export function cardKind(text: string): CardKind | undefined {
 const DONE = 'Mark each target done with the evidence that shows it (a test, or a run you watched), and do not say the work is done while one is open.'
 
 // What the model is told along with the card. `hasBrowser`: playwright-cli is installed.
-export function cardNote(kind: CardKind, hasBrowser: boolean): string {
+export function cardNote(kind: CardKind, hasBrowser: boolean, hasDiagnose = false): string {
   const head = '[Jean-Claude Van Code]'
   if (kind === 'bug')
     return [
       `${head} This message reads as a bug report. Before fixing it:`,
+      ...(hasDiagnose ? ['0. If the cause is not plain after one read of the code involved, call the Skill tool with "diagnosing-bugs" and follow its loop; it covers the steps below.'] : []),
       `1. Reproduce it: a test that fails${hasBrowser ? ', or for a UI bug the steps walked in a browser with playwright-cli' : ', or the steps run'}, and show it failing. If you cannot reproduce it, say so and ask; do not guess a fix.`,
       '2. Find the cause, and record in the assumptions tool what the fix rests on; list as targets every repo or service the fix must reach.',
       '3. Fix it, then show the same reproduction passing and run the tests that reach the change.',
