@@ -64,6 +64,12 @@
       "description": "Holds terraform/tofu apply, kubectl and helm changes until a plan, diff or dry run ran, and refuses deletes (kubectl, helm, aws, gcloud, az, pulumi) once. Running the command again goes through.",
       "default": true
     },
+    "receipts": {
+      "type": "boolean",
+      "title": "Receipts",
+      "description": "Checks Claude's final answer against the tool output: a test count that differs from the turn's last test run, or a commit hash no tool showed, is flagged and Claude corrects it on your next message.",
+      "default": true
+    },
     "adhd": {
       "type": "boolean",
       "title": "ADHD mode",

@@ -3,6 +3,7 @@ import type { EngineInterface, ModelUsage, PluginOptions, Register, SessionMessa
 import { affectedTests, allTests, checkFile, namedTests, reachesAny, testsText } from './checks.js'
 import { cardKind, cardNote } from './card.js'
 import { findAttribution } from './attribution.js'
+import { checkReceipts, hashesIn } from './receipts.js'
 import { judgeInfra } from './infra.js'
 import { cacheKey, changedRoots, isStale, manifestHashes, type ScanCache, type ScanItem, stackScan } from './stack.js'
 import { isCovered, parseShellRead, type Range, readRange, resolvePath } from './reads.js'
@@ -62,6 +63,7 @@ const stats = {
   pdfsToOcr: 0,
   jsonToJq: 0,
   loopsCaught: 0,
+  receiptsFlagged: 0,
   heavyTokens: 0,
   checkCatches: 0,
   chongRuns: 0,
@@ -145,6 +147,7 @@ function statsText() {
     `PDFs pointed to Indra OCR: ${stats.pdfsToOcr} · ${status.indra === 'ok' ? 'indra installed' : 'indra not installed'}`,
     `Big JSON pointed to jq: ${stats.jsonToJq} · ${status.jq === 'ok' ? 'jq installed' : 'jq not installed'}`,
     `Loops caught (the same command failing ${LOOP_FAILS} times in a row): ${stats.loopsCaught}`,
+    `Answer claims the tool output contradicted (receipts): ${stats.receiptsFlagged} · receipts ${onOff(isOn('receipts'))}`,
     `Infra changes held for a preview: ${stats.infraBlocked} · infra guard ${onOff(isOn('infraGuard'))}`,
     `Test runs that missed the edited code: ${stats.proofGaps} · prove it ${onOff(isOn('proveIt'))}`,
     `Cards read as a story, bug or task and planned first: ${stats.cards} · card plan ${onOff(isOn('cardPlan'))}`,
@@ -255,6 +258,44 @@ function touchTargets(file: string) {
       isChanged = true
     }
   return isChanged
+}
+
+// Receipts: the main thread's tool output this turn, and every hex run any tool printed this session.
+const TURN_OUTPUT_MAX = 200_000
+let turnOutput = ''
+const seenHashes = new Set<string>()
+
+// Post-edit check, per batch: the edits one response asks for land together, and the check runs once
+// the last of them has, on every file the batch touched. Checking after each edit reported errors the
+// next edit of the same response was about to fix.
+type EditBatch = { pending: number; files: Set<string> }
+const editBatches = new Map<string, EditBatch>() // by agent
+const isCheckedEdit = (tool: string, file: string) => (tool === 'Edit' || tool === 'Write') && (CODE_FILE.test(file) || INFRA_FILE.test(file))
+
+// One file's check: updates the proof and stuck-error state, returns the note for Claude, if any.
+async function checkEdited($: EngineInterface, file: string): Promise<string | undefined> {
+  const found = await checkFile($, file)
+  // a clean type-check is a verification; a syntax-only pass is not
+  if (found?.isClean && (found.tool === 'tsc' || found.tool === 'go vet')) hasUnverifiedEdit = false
+  // with no test to run, a clean syntax check is all the proof there is (judged at turn end)
+  if (found?.isClean) syntaxClean.add(file)
+  else syntaxClean.delete(file)
+  if (!found?.errors) {
+    checkFails.delete(file)
+    return undefined
+  }
+  stats.checkCatches += 1
+  // the same errors after another edit: a structural one, which retrying rarely fixes
+  const sig = errorSig(found.errors)
+  const before = checkFails.get(file)
+  const count = before?.sig === sig ? before.count + 1 : 1
+  checkFails.set(file, { sig, count })
+  const stuck =
+    count >= STUCK_EDITS
+      ? `\nThis is the same error after ${count} edits: stop patching the line. Read the definition it points at (the function's signature, the type, the declaration or the import) and fix the mismatch at its source.`
+      : ''
+  if (stuck) stats.stuckChecks += 1
+  return `[Jean-Claude Van Code] ${found.tool} reports errors in ${file} after this edit:\n${found.errors}\nFix them before moving on.${stuck}`
 }
 
 // Context alarm: warn once past 60%, re-arm under 50% (after a /compact or /clear).
@@ -676,6 +717,8 @@ export const register: Register = (on, opts) => {
     isGuardOn = isOn('guard')
     frozen = undefined
     setCache(null)
+    turnOutput = ''
+    seenHashes.clear()
     startChecks = checkAll($)
     if (isOn('intro')) {
       play($)
@@ -907,6 +950,10 @@ export const register: Register = (on, opts) => {
       restore = undefined
     }
     task.toolCalls += 1
+    if (!e.agentId && ran.text) {
+      turnOutput = (turnOutput + '\n' + ran.text).slice(-TURN_OUTPUT_MAX)
+      for (const h of hashesIn(ran.text)) seenHashes.add(h)
+    }
     if (e.tool === 'Bash') {
       const who = e.agentId ?? 'main'
       const command = e.command.trim()
@@ -953,34 +1000,17 @@ export const register: Register = (on, opts) => {
       if (named.length > 0) ranTests.push(...named)
       else hasUnverifiedEdit = false
     }
-    if (isOn('postEditCheck') && (e.tool === 'Edit' || e.tool === 'Write') && (CODE_FILE.test(e.file_path) || INFRA_FILE.test(e.file_path)) && !ran.isError) {
-      const found = await checkFile($, e.file_path)
-      // a clean type-check is a verification; a syntax-only pass is not
-      if (found?.isClean && (found.tool === 'tsc' || found.tool === 'go vet')) hasUnverifiedEdit = false
-      // with no test to run, a clean syntax check is all the proof there is (judged at turn end)
-      if (found?.isClean) syntaxClean.add(e.file_path)
-      else syntaxClean.delete(e.file_path)
-      if (!found?.errors) checkFails.delete(e.file_path)
-      if (found?.errors) {
-        stats.checkCatches += 1
-        // the same errors after another edit: a structural one, which retrying rarely fixes
-        const sig = errorSig(found.errors)
-        const before = checkFails.get(e.file_path)
-        const count = before?.sig === sig ? before.count + 1 : 1
-        checkFails.set(e.file_path, { sig, count })
-        const stuck =
-          count >= STUCK_EDITS
-            ? `\nThis is the same error after ${count} edits: stop patching the line. Read the definition it points at (the function's signature, the type, the declaration or the import) and fix the mismatch at its source.`
-            : ''
-        if (stuck) stats.stuckChecks += 1
-        return {
-          ...ran,
-          context: [
-            ...(ran.context ?? []),
-            `[Jean-Claude Van Code] ${found.tool} reports errors in ${e.file_path} after this edit:\n${found.errors}\nFix them before moving on.${stuck}`,
-          ],
-        }
-      }
+    if (isOn('postEditCheck') && (e.tool === 'Edit' || e.tool === 'Write') && isCheckedEdit(e.tool, e.file_path)) {
+      const who = e.agentId ?? 'main'
+      const batch = editBatches.get(who) ?? { pending: 1, files: new Set<string>() }
+      batch.pending -= 1
+      if (!ran.isError) batch.files.add(e.file_path)
+      editBatches.set(who, batch)
+      // more edits of this response still to land: an error now may be one they fix
+      if (batch.pending > 0) return ran
+      editBatches.delete(who)
+      const notes = (await Promise.all([...batch.files].map(f => checkEdited($, f)))).filter(Boolean) as string[]
+      if (notes.length > 0) return { ...ran, context: [...(ran.context ?? []), ...notes] }
     }
     return ran
   })
@@ -1104,6 +1134,15 @@ export const register: Register = (on, opts) => {
           .join(' '),
       )
     }
+    if (!e.agentId && 'answer' in e) {
+      const bad = isOn('receipts') ? checkReceipts(e.answer, turnOutput, seenHashes) : []
+      if (bad.length > 0) {
+        stats.receiptsFlagged += bad.length
+        $.ui.toast(`Receipts: ${bad.length} claim(s) in the last answer don't match the tool output`)
+        notes.push(`[Jean-Claude Van Code] Receipts: your last answer claimed ${bad.join('; ')}. Correct it for the user in one line.`)
+      }
+      turnOutput = ''
+    }
     void refreshStatus($)
     return next(e)
   })
@@ -1139,6 +1178,12 @@ export const register: Register = (on, opts) => {
       setCache({ at, ttl: ttlOf(u, cache?.ttl), tokens: u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens + u.output_tokens })
       isColdWarned = false
     }
+    // the code edits this response asks for, so the post-edit check waits for the last of them
+    const who = e.agentId ?? 'main'
+    const edits = r.toolUses.filter(u => isCheckedEdit(u.name, (u.input as { file_path?: string } | null)?.file_path ?? ''))
+    // shortcut: an edit that never reaches tool.call (denied, aborted) leaves its batch unchecked; the next step starts over
+    if (edits.length > 0) editBatches.set(who, { pending: edits.length, files: new Set() })
+    else editBatches.delete(who)
     return r
   })
 

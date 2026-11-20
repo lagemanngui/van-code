@@ -35,7 +35,7 @@ It installs the recommended tools: [`rtk`](https://github.com/rtk-ai/rtk) for le
 - **Safety rails for live infra.** `terraform apply`, `kubectl`/`helm` changes and cloud deletes are held until a plan, diff or dry run has run.
 - **Your session, visible.** A band above the prompt shows the model, the 5h/7d rate limits, context, and how many minutes the prompt cache has left. `/van-code-stats` shows what the mod saved and what it spent.
 
-Also included: assumption and target ledgers for multi-repo work, compaction that keeps your constraints, a guard against AI attribution in commits, and the [i-have-adhd](https://github.com/ayghri/i-have-adhd) output style. The [feature reference](docs/features.md) covers each one.
+Also included: receipts that check the final answer's test counts and commit hashes against the tool output, assumption and target ledgers for multi-repo work, compaction that keeps your constraints, a guard against AI attribution in commits, and the [i-have-adhd](https://github.com/ayghri/i-have-adhd) output style. The [feature reference](docs/features.md) covers each one.
 
 ## When not to use it
 

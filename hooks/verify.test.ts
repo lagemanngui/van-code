@@ -47,3 +47,50 @@ test('infra files: terraform, helm charts and Kubernetes manifests get their che
   expect(await edit('/w/ci.yml')).toBe('') // not a manifest
   expect(ran.some(a => a.includes('ci.yml'))).toBe(false)
 })
+
+test('the post-edit check waits for the last edit of a response, then checks every file it touched', async ($, on) => {
+  let isFixed = false
+  const checked: string[] = []
+  on('fs.stat', (_, e) => {
+    if (String((e as { path: string }).path) === '/t/main.tf') return { value: { kind: 'file', size: 1, mtimeMs: 1, isLink: false } } as never
+    throw new Error('ENOENT')
+  })
+  on('fs.read', () => ({ value: '' }) as never)
+  on('process.run', (_, e) => {
+    const argv = e.argv.join(' ')
+    if (argv.startsWith('terraform fmt')) checked.push(argv)
+    const isBad = argv.startsWith('terraform fmt') && !isFixed
+    return { value: { exitCode: isBad ? 1 : 0, stdout: isBad ? 'Error: bad thing' : '', stderr: '' } } as never
+  })
+  on('tool.call', () => ({ result: {} }))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('clock.now', () => ({ value: 0 }) as never)
+  const tf = { tool: 'Edit', file_path: '/t/main.tf', old_string: 'a', new_string: 'b' }
+  let edits = 0
+  on('turn.step', async function* () {
+    return { turnId: 't', index: 0, answer: '', toolUses: Array.from({ length: edits }, () => ({ name: 'Edit', input: tf })), stopReason: 'tool_use', usage: null }
+  } as never)
+  const step = (n: number) => {
+    edits = n
+    const s = $.turn.step({ turnId: 't', index: 0, model: 'm', messageCount: 1 } as never)
+    return (async () => {
+      for await (const _ of s);
+      return s.result
+    })()
+  }
+  const edit = async () => ((await $.tool.call(tf as never)).context ?? []).join('\n')
+
+  // two edits in one response: the first is not checked, the second fixes what the first broke
+  await step(2)
+  expect(await edit()).toBe('')
+  expect(checked.length).toBe(0)
+  isFixed = true
+  expect(await edit()).toBe('')
+  expect(checked.length).toBe(1)
+
+  // an error the batch leaves standing is still reported, once, on its last edit
+  isFixed = false
+  await step(2)
+  expect(await edit()).toBe('')
+  expect(await edit()).toContain('terraform fmt reports errors in /t/main.tf')
+})
