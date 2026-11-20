@@ -1,6 +1,6 @@
 {
   "name": "van-code",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "description": "Jean-Claude Van Code: guards what Claude reads, checks every edit, and makes it prove the work before saying done",
   "keywords": ["claude-code", "hooks", "token-optimization", "prompt-caching", "code-review", "developer-tools"],
   "userConfig": {
