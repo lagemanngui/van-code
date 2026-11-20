@@ -67,6 +67,7 @@ const stats = {
   restores: 0,
   proofGaps: 0,
   trimmedTokens: 0,
+  stuckChecks: 0,
 }
 
 // Infra guard: live-infra changes wait for a preview (plan, diff, dry run) of their family.
@@ -144,7 +145,7 @@ function statsText() {
     sessionCost !== undefined && requestsDone > 0
       ? `Average per request: ~US$ ${(sessionCost / requestsDone).toFixed(2)} over ${requestsDone} (cost includes the mod's Haiku calls)`
       : 'Average per request: no cost figure yet',
-    `Errors caught right after an edit: ${stats.checkCatches} (type or syntax errors the post-edit check found in an edited file · post-edit check ${onOff(isOn('postEditCheck'))})`,
+    `Errors caught right after an edit: ${stats.checkCatches} (type or syntax errors the post-edit check found in an edited file · post-edit check ${onOff(isOn('postEditCheck'))}); stuck on the same error ${STUCK_EDITS}+ edits in a row: ${stats.stuckChecks}`,
     `Chong Li: ${stats.chongRuns} reviews, ${stats.chongFindings} findings`,
     `Mod suggestions: ${stats.suggestShown} shown, ${stats.suggestTaken} taken`,
     `Haiku calls: ${k(stats.haikuIn)} input tokens, ${k(stats.haikuOut)} output tokens`,
@@ -248,6 +249,8 @@ function touchTargets(file: string) {
 // Context alarm: warn once past 60%, re-arm under 50% (after a /compact or /clear).
 let isContextWarned = false
 
+// No "think step by step" here: chain-of-thought shifts the mix of code errors more than it
+// cuts them (Nogueira et al., arXiv 2608.00661), and costs tokens every turn.
 const RULES = `# Jean-Claude Van Code
 - Assertive: verify before you claim. If unsure, check with a tool instead of guessing, and say plainly what you did not check.
 - Economical: the fewest steps that do the job. Read a small file (under ~300 lines) whole, once; in a big file or unfamiliar code, Grep first and Read only the slice you need. Never read lockfiles, dependencies, build output or minified files whole.
@@ -290,6 +293,13 @@ async function jsonDeny($: EngineInterface, agentId: string | undefined, file: s
 
 const ASTGREP_RULE =
   "- Code by structure: `ast-grep -p '<pattern>' -l <lang> [paths]` finds code by its shape (`fetch($$$)` calls, a function by signature) where a regex would be fragile; `$X` matches one node, `$$$` many."
+
+// Stuck checker: the same checker errors on a file edit after edit, per file.
+const STUCK_EDITS = 2
+const checkFails = new Map<string, { sig: string; count: number }>()
+// Errors without line and column numbers, which move as the file is edited.
+export const errorSig = (errors: string) =>
+  errors.replace(/[:(]\d+(,\d+)?\)?(:\d+)?/g, '').replace(/\bline \d+/g, 'line').trim()
 
 // Loop detector: the same shell command failing again and again, per agent.
 const LOOP_FAILS = 3
@@ -352,6 +362,7 @@ const CHONG_LI_SYSTEM = `You are Chong Li, a ruthless adversarial code reviewer.
 Find ONE concrete way these changes break: a specific input or state, and the crash, wrong result, data loss or security hole it causes.
 Only real defects. No style, naming, refactors or "consider adding tests".
 You see only the changes, not the rest of the code: never claim a bug that depends on code you cannot see.
+Look hardest at the runtime defects compilers and retries rarely catch: an index past either end (i-1 at i=0, <= length, an empty list), integer overflow, recursion with no depth bound, and input parsing that breaks on empty, missing or oddly formatted input.
 If you cannot name a concrete failing scenario, answer exactly: NONE
 Otherwise answer in at most 3 short lines: the file and what breaks, then the input or state that triggers it.`
 
@@ -791,13 +802,24 @@ export const register: Register = (on, opts) => {
       // with no test to run, a clean syntax check is all the proof there is (judged at turn end)
       if (found?.isClean) syntaxClean.add(e.file_path)
       else syntaxClean.delete(e.file_path)
+      if (!found?.errors) checkFails.delete(e.file_path)
       if (found?.errors) {
         stats.checkCatches += 1
+        // the same errors after another edit: a structural one, which retrying rarely fixes
+        const sig = errorSig(found.errors)
+        const before = checkFails.get(e.file_path)
+        const count = before?.sig === sig ? before.count + 1 : 1
+        checkFails.set(e.file_path, { sig, count })
+        const stuck =
+          count >= STUCK_EDITS
+            ? `\nThis is the same error after ${count} edits: stop patching the line. Read the definition it points at (the function's signature, the type, the declaration or the import) and fix the mismatch at its source.`
+            : ''
+        if (stuck) stats.stuckChecks += 1
         return {
           ...ran,
           context: [
             ...(ran.context ?? []),
-            `[Jean-Claude Van Code] ${found.tool} reports errors in ${e.file_path} after this edit:\n${found.errors}\nFix them before moving on.`,
+            `[Jean-Claude Van Code] ${found.tool} reports errors in ${e.file_path} after this edit:\n${found.errors}\nFix them before moving on.${stuck}`,
           ],
         }
       }
