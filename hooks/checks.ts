@@ -52,7 +52,11 @@ export async function checkFile(
     // shortcut: whole-project tsc filtered to this file; slow projects hit the timeout and go unchecked.
     const root = await findUp($, dirOf(file), 'tsconfig.json')
     if (!root || !(await exists($, `${root}/node_modules/.bin/tsc`))) return undefined
-    const r = await exec([`${root}/node_modules/.bin/tsc`, '--noEmit', '--pretty', 'false', '-p', root], root)
+    // --incremental reuses the last run's types (0.34 s to 0.06 s on this repo); its build info goes
+    // to the session scratchpad, never into the user's project. No scratchpad: a full run, as before.
+    const scratch = await $.session.info().then(i => i.scratchpadDir).catch(() => undefined)
+    const incremental = scratch ? ['--incremental', '--tsBuildInfoFile', `${scratch}/van-code-tsc${root.replace(/\W/g, '_')}.tsbuildinfo`] : []
+    const r = await exec([`${root}/node_modules/.bin/tsc`, '--noEmit', '--pretty', 'false', ...incremental, '-p', root], root)
     if (!r) return undefined
     // errors only in other files: not clean, but nothing to report about this one
     return { tool: 'tsc', isClean: r.code === 0, errors: r.code === 0 ? undefined : pick(r.out) || undefined }

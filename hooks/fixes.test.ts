@@ -102,3 +102,23 @@ test('after installing a plugin, setup reloads the plugins by itself', async ($,
   await clock.advance(1_000)
   expect(ran).toContain('reload-plugins')
 })
+
+test('tsc runs incrementally with its build info in the session scratchpad, never in the project', async ($, on) => {
+  const runs: string[][] = []
+  on('fs.stat', () => ({ value: STAT }) as never)
+  on('session.info', () => ({ value: { transcriptPath: '', scratchpadDir: '/scratch' } }) as never)
+  on('process.run', (_, e) => {
+    runs.push([...e.argv])
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  on('tool.call', () => ({ result: {} }))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1 }, rateLimits: [] } }) as never)
+  on('turn.complete', () => ({ text: 'ok' }) as never)
+  await $.tool.call(edit)
+  await $.turn.complete({ answer: 'ok' } as never)
+  const tsc = runs.find(a => a[0]!.endsWith('/tsc'))!
+  expect(tsc).toContain('--incremental')
+  expect(tsc[tsc.indexOf('--tsBuildInfoFile') + 1]!.startsWith('/scratch/')).toBe(true)
+})
