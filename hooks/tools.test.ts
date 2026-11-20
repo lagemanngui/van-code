@@ -59,4 +59,6 @@ test('the scoreboard shows what the last request cost and did', async ($, on) =>
   for (let i = 0; i < 20; i++) await Promise.resolve()
   const r = await $.command.run({ command: 'van-code-stats', args: '' } as never)
   expect(String(r.text)).toContain('Last request: ~US$ 0.00, 1 tool calls')
+  // the average is over this mod's own requests, not the engine's whole-session total
+  expect(String(r.text)).toContain('Average per request: ~US$ 0.00 over 1')
 })

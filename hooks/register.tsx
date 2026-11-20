@@ -153,8 +153,8 @@ function statsText() {
     `Restored after a compaction: ${stats.restores} · compaction restore ${onOff(isOn('compactRestore'))}`,
     lastTask ? `Last request: ${lastTask}` : 'Last request: none finished yet',
     `Session: ${tokensLine(tokens)}`,
-    sessionCost !== undefined && requestsDone > 0
-      ? `Average per request: ~US$ ${(sessionCost / requestsDone).toFixed(2)} over ${requestsDone} (cost includes the mod's Haiku calls)`
+    requestsDone > 0
+      ? `Average per request: ~US$ ${(costDone / requestsDone).toFixed(2)} over ${requestsDone} (cost includes the mod's Haiku calls)`
       : 'Average per request: no cost figure yet',
     `Errors caught right after an edit: ${stats.checkCatches} (type or syntax errors the post-edit check found in an edited file · post-edit check ${onOff(isOn('postEditCheck'))}); stuck on the same error ${STUCK_EDITS}+ edits in a row: ${stats.stuckChecks}`,
     `Chong Li: ${stats.chongRuns} reviews, ${stats.chongFindings} findings`,
@@ -378,8 +378,10 @@ type Tokens = { requests: number; input: number; cacheRead: number; cacheWrite: 
 export const noTokens = (): Tokens => ({ requests: 0, input: 0, cacheRead: 0, cacheWrite: 0, output: 0 })
 const tokens = noTokens()
 let taskTokens = noTokens()
-let requestsDone = 0 // person's requests finished this session, for the average cost
-let sessionCost: number | undefined // US$, from the engine's ledger at the last measure
+// Person's requests finished since the mod loaded, and their summed cost. Not the engine's session
+// total: that one spans the whole session, a /reload-plugins included, and would inflate the average.
+let requestsDone = 0
+let costDone = 0
 export function addTokens(u: ModelUsage, into: Tokens[] = [tokens, taskTokens]) {
   for (const t of into) {
     t.requests += 1
@@ -670,7 +672,7 @@ export const register: Register = (on, opts) => {
     previewed.clear()
     Object.assign(tokens, noTokens()) // /clear starts the session's figures over
     requestsDone = 0
-    sessionCost = undefined
+    costDone = 0
     isGuardOn = isOn('guard')
     frozen = undefined
     setCache(null)
@@ -1072,8 +1074,11 @@ export const register: Register = (on, opts) => {
     if (!e.agentId && task.startedAt) {
       const done = { ...task }
       const used = taskTokens
-      requestsDone += 1
       void $.session.usage().then(u => {
+        if (u.cost) {
+          requestsDone += 1
+          costDone += u.cost.usd - done.costUsd
+        }
         const cost = u.cost ? `~US$ ${(u.cost.usd - done.costUsd).toFixed(2)}, ` : ''
         lastTask = `${cost}${done.toolCalls} tool calls, ${duration(Date.now() - done.startedAt)}, ${used.requests} model requests, ${hitRate(used)}% of input from cache`
       }).catch(() => {})
@@ -1138,7 +1143,6 @@ export const register: Register = (on, opts) => {
   })
 
   on('session.measure', async ($, e, next) => {
-    if (e.cost) sessionCost = e.cost.usd
     void refreshStatus($)
     void scanNotice($)
     if (isOn('usageHeader')) {
