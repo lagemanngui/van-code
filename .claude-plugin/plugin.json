@@ -63,6 +63,12 @@
       "description": "Holds terraform/tofu apply, kubectl and helm changes until a plan, diff or dry run ran, and refuses deletes (kubectl, helm, aws, gcloud, az, pulumi) once. Running the command again goes through.",
       "default": true
     },
+    "noAttribution": {
+      "type": "boolean",
+      "title": "No AI attribution",
+      "description": "Claude never credits itself or any AI in commits, PRs, comments or docs; a git commit or gh pr/issue carrying an AI Co-Authored-By or \"Generated with\" line is refused until the line is removed.",
+      "default": true
+    },
     "compactRestore": {
       "type": "boolean",
       "title": "Compaction restore",

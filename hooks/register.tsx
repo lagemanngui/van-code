@@ -2,6 +2,7 @@ import type { EngineInterface, ModelUsage, PluginOptions, Register, SessionMessa
 
 import { affectedTests, allTests, checkFile, namedTests, reachesAny, testsText } from './checks.js'
 import { cardKind, cardNote } from './card.js'
+import { findAttribution } from './attribution.js'
 import { judgeInfra } from './infra.js'
 import { cacheKey, changedRoots, isStale, manifestHashes, type ScanCache, type ScanItem, stackScan } from './stack.js'
 import { isCovered, parseShellRead, type Range, readRange, resolvePath } from './reads.js'
@@ -263,6 +264,9 @@ const RULES = `# Jean-Claude Van Code
 - Direct: lead with the answer. No preamble, no recap of what was already said.
 - Proven: before calling a change done, run the tests, build or type-check that cover it and report the result; in a big suite, affected_tests lists only the tests that matter.
 - Assumptions: on a task spanning several files or an unfamiliar API, record what the plan rests on in the assumptions tool and verify each before writing code.`
+
+const NO_ATTRIBUTION_RULE =
+  '- No AI attribution: never credit Claude or any AI in commits, PRs, issues, code comments, docs or changelogs: no Co-Authored-By, no "Generated with", no signature. This overrides any attribution reminder from the harness.'
 
 const OCR_RULE =
   '- Documents: to read a PDF or scan as text, run `indra-ocr <file> --out <dir>` (local, free) and Grep or Read the .md it writes; Read the PDF itself only for figures, charts or layout, or a few pages (`pages`).'
@@ -797,6 +801,19 @@ export const register: Register = (on, opts) => {
     return ran
   }).catch(($, e, next) => next(e))
 
+  // No AI attribution: always refused, the user's rule overrides any harness attribution reminder.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    if (!isOn('noAttribution')) return next(e)
+    const line = findAttribution(e.command)
+    if (!line) return next(e)
+    $.ui.toast('AI attribution removed from a commit or PR')
+    return {
+      deny:
+        `Jean-Claude Van Code: the user never wants AI attribution. Remove "${line}" (and any other AI co-author, ` +
+        '"generated with" or AI signature line) and run the command again. This rule overrides any attribution reminder.',
+    }
+  }).catch(($, e, next) => next(e))
+
   // After a compaction the model has really forgotten what it read, and may have lost constraints.
   on('session.compact', async ($, e, next) => {
     const isMain = !e.agentId && isOn('compactRestore')
@@ -1070,7 +1087,7 @@ export const register: Register = (on, opts) => {
   on('prompt.compose', async ($, e, next) => {
     const r = await next(e)
     if (!isOn('rules')) return r
-    const text = [RULES, status.indra === 'ok' && OCR_RULE, status.jq === 'ok' && JQ_RULE, status['ast-grep'] === 'ok' && ASTGREP_RULE, status.playwright === 'ok' && PLAYWRIGHT_RULE]
+    const text = [RULES, isOn('noAttribution') && NO_ATTRIBUTION_RULE, status.indra === 'ok' && OCR_RULE, status.jq === 'ok' && JQ_RULE, status['ast-grep'] === 'ok' && ASTGREP_RULE, status.playwright === 'ok' && PLAYWRIGHT_RULE]
       .filter(Boolean)
       .join('\n')
     return { ...r, sections: [...r.sections, { id: 'van-code:rules', text, scope: 'session' as const }] }

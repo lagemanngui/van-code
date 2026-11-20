@@ -54,6 +54,7 @@ After installing, run `/van-code-setup` once to install the recommended tools (s
 - **Assumption ledger.** On a non-trivial task, the `assumptions` tool records what the plan rests on and the cheapest proof for each item, before any code is written. The ledger shows live above the prompt. Saying "done" with open assumptions gets flagged.
 - **Targets.** For work across repositories, services or contracts, the ledger also lists every target the change must reach. An edit inside a repository target (an absolute path) marks it done; the others are marked done or n/a by Claude, with a note. Saying "done" with a target still open gets flagged, so the work does not stop at the first green repo.
 - **Infra guard.** `terraform`/`tofu apply`, `pulumi up`, and `kubectl`/`helm` changes are held once until a preview of the same tool ran in the session (`plan`, `kubectl diff`, `--dry-run=server`, `helm template`); applying a saved plan file passes. Deletes (`terraform destroy`, `kubectl delete`, `helm uninstall`, `aws`/`gcloud`/`az` delete and terminate, `aws s3 sync --delete`) are refused once, with a reminder to check the target context or account. Running the same command again goes through.
+- **No AI attribution.** Claude is told never to credit itself or any AI in commits, PRs, issues, comments or docs. A `git commit`/`tag`/`notes`/`merge` or `gh pr`/`issue`/`release` carrying an AI `Co-Authored-By`, a "Generated with Claude Code" line or `noreply@anthropic.com` is refused every time, until the line is removed.
 - **Compaction trim.** Before a compaction, old tool output over 2,000 characters is cut to its first 600, so the summarizer reads decisions, not dumps, and costs less. The newest 12 messages and error outputs stay whole.
 - **Compaction restore.** On a compaction the summarizer is told to keep the user's constraints, the repos and services involved, and the reasons behind decisions. Right after it, your own messages from the session (verbatim, the newest 4,000 characters) and the assumption ledger ride back to Claude on the next tool result, or on your next message.
 - **Automatic Chong Li.** Changes over 30 lines, or in risky areas (data deletion, migrations, auth, money, concurrency, parsing, SQL), get a cheap review by Haiku, which sees only the diff and must name one concrete failing scenario or nothing. It looks hardest at the runtime defects compilers and retries rarely catch: indexes past either end, overflow, unbounded recursion and fragile input parsing. Findings reach Claude on your next message, flagged as possibly wrong.
@@ -114,6 +115,7 @@ Every automatic behavior has a switch in the plugin's settings (`/config`), all 
 | `contextAlarm` | Context alarm |
 | `rules` | Van Code rules |
 | `infraGuard` | Infra guard |
+| `noAttribution` | No AI attribution |
 | `compactRestore` | Compaction restore |
 | `compactTrim` | Compaction trim |
 | `cardPlan` | Card plan |
