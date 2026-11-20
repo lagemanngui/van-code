@@ -5,6 +5,8 @@ import { cardKind, cardNote } from './card.js'
 import { findAttribution } from './attribution.js'
 import { checkReceipts, hashesIn } from './receipts.js'
 import { judgeInfra } from './infra.js'
+import { judgeGit } from './git.js'
+import { type Attempt, commandKey, errorLine, loopNote, nextStreak } from './loops.js'
 import { cacheKey, changedRoots, isStale, manifestHashes, type ScanCache, type ScanItem, stackScan } from './stack.js'
 import { isCovered, parseShellRead, type Range, readRange, resolvePath } from './reads.js'
 import { checkAll, cwd, findRoots, hasWeb, infra, install, isLacking, langs, RECS, roots, run, setCwd, status } from './factory.js'
@@ -73,6 +75,7 @@ const stats = {
   haikuIn: 0,
   haikuOut: 0,
   infraBlocked: 0,
+  gitBlocked: 0,
   restores: 0,
   proofGaps: 0,
   trimmedTokens: 0,
@@ -146,9 +149,10 @@ function statsText() {
     `Heavy files blocked: ${stats.heavyBlocked} (~${k(stats.heavyTokens)} tokens) · guard ${onOff(isGuardOn)}`,
     `PDFs pointed to Indra OCR: ${stats.pdfsToOcr} · ${status.indra === 'ok' ? 'indra installed' : 'indra not installed'}`,
     `Big JSON pointed to jq: ${stats.jsonToJq} · ${status.jq === 'ok' ? 'jq installed' : 'jq not installed'}`,
-    `Loops caught (the same command failing ${LOOP_FAILS} times in a row): ${stats.loopsCaught}`,
+    `Loops caught (${LOOP_FAILS} related commands failing in a row): ${stats.loopsCaught}`,
     `Answer claims the tool output contradicted (receipts): ${stats.receiptsFlagged} · receipts ${onOff(isOn('receipts'))}`,
     `Infra changes held for a preview: ${stats.infraBlocked} · infra guard ${onOff(isOn('infraGuard'))}`,
+    `Git commands held over uncommitted work or a force push: ${stats.gitBlocked} · git guard ${onOff(isOn('gitGuard'))}`,
     `Test runs that missed the edited code: ${stats.proofGaps} · prove it ${onOff(isOn('proveIt'))}`,
     `Cards read as a story, bug or task and planned first: ${stats.cards} · card plan ${onOff(isOn('cardPlan'))}`,
     `UI changes Claude was asked to check in a browser: ${stats.uiSuggested} · ${status.playwright === 'ok' ? 'playwright-cli installed' : status.playwright === 'none' ? 'no web frontend here' : 'playwright-cli not installed'}`,
@@ -405,9 +409,9 @@ const checkFails = new Map<string, { sig: string; count: number }>()
 export const errorSig = (errors: string) =>
   errors.replace(/[:(]\d+(,\d+)?\)?(:\d+)?/g, '').replace(/\bline \d+/g, 'line').trim()
 
-// Loop detector: the same shell command failing again and again, per agent.
+// Loop detector: related shell commands failing again and again, per agent.
 const LOOP_FAILS = 3
-const failing = new Map<string, { command: string; count: number }>()
+const failing = new Map<string, Attempt[]>()
 
 // The last finished request: what it cost and how much it did.
 let task = { costUsd: 0, startedAt: 0, toolCalls: 0 }
@@ -891,6 +895,38 @@ export const register: Register = (on, opts) => {
     return ran
   }).catch(($, e, next) => next(e))
 
+  // Git: discarding uncommitted work, or force-pushing, is refused once with what would be lost.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    if (!isOn('gitGuard')) return next(e)
+    const found = judgeGit(e.command)
+    const key = `git|${e.command.trim()}`
+    if (!found || onceWarned.has(key)) return next(e)
+    let dirty = ''
+    if (found.kind === 'discard') {
+      // shortcut: status of the session folder (or `-C`), not of a `cd x &&` target; the deny names the folder checked.
+      const dir = found.dir ? resolvePath(cwd, undefined, found.dir) : cwd
+      try {
+        const r = await $.process.run(['git', 'status', '--porcelain'], { ...(dir ? { cwd: dir } : {}), timeoutMs: 10_000 })
+        if (r.exitCode !== 0) return next(e) // not a repository: git will say so itself
+        dirty = r.stdout.trim()
+      } catch {
+        return next(e)
+      }
+      if (!dirty) return next(e) // nothing uncommitted to lose
+    }
+    onceWarned.add(key)
+    stats.gitBlocked += 1
+    $.ui.toast(`Git ${found.kind === 'force' ? 'force push' : 'discard'} held: Claude was told to check first`)
+    const files = dirty.split('\n').slice(0, 15).join('\n')
+    return {
+      deny:
+        `Jean-Claude Van Code: ${found.what}. ` +
+        (found.kind === 'discard' ? `Uncommitted changes in ${found.dir ?? cwd}:\n${files}\nSome may be the user's own work, not yours. ` : '') +
+        'Prefer a safer form (`git stash`, a path-specific restore, `--force-with-lease`). ' +
+        'If the user asked for this exact action, or you checked nothing above would be lost, run the same command again and it will go through.',
+    }
+  }).catch(($, e, next) => next(e))
+
   // Resuming after the cache lapsed: the first message re-caches the whole transcript.
   on('classic.SessionStart', ($, e, next) => {
     if ((e.source === 'resume' || e.source === 'fork') && e.prompt_cache_likely_expired && (e.context_tokens ?? 0) >= COLD_MIN_TOKENS) {
@@ -957,21 +993,18 @@ export const register: Register = (on, opts) => {
     if (e.tool === 'Bash') {
       const who = e.agentId ?? 'main'
       const command = e.command.trim()
-      if (!ran.isError) failing.delete(who)
-      else {
-        const before = failing.get(who)
-        const count = before?.command === command ? before.count + 1 : 1
-        failing.set(who, { command, count })
-        if (count === LOOP_FAILS) {
+      const key = commandKey(command)
+      const streak = failing.get(who) ?? []
+      // an unrelated success (a `cat`, an `ls`) between attempts does not end the streak
+      if (!ran.isError) {
+        if (streak.at(-1)?.key === key) failing.delete(who)
+      } else {
+        const grown = nextStreak(streak, { command, key, error: errorLine(ran.text ?? '') })
+        failing.set(who, grown)
+        if (grown.length === LOOP_FAILS) {
           stats.loopsCaught += 1
-          $.ui.toast(`The same command failed ${LOOP_FAILS} times in a row: Claude was told to change course`)
-          return {
-            ...ran,
-            context: [
-              ...(ran.context ?? []),
-              `[Jean-Claude Van Code] This exact command has now failed ${LOOP_FAILS} times in a row. Stop retrying it. Read the error, find its cause, and change the approach, or tell the user what blocks you.`,
-            ],
-          }
+          $.ui.toast(`${LOOP_FAILS} related commands failed in a row: Claude was told to change course`)
+          return { ...ran, context: [...(ran.context ?? []), loopNote(grown)] }
         }
       }
     }

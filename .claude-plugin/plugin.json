@@ -64,6 +64,12 @@
       "description": "Holds terraform/tofu apply, kubectl and helm changes until a plan, diff or dry run ran, and refuses deletes (kubectl, helm, aws, gcloud, az, pulumi) once. Running the command again goes through.",
       "default": true
     },
+    "gitGuard": {
+      "type": "boolean",
+      "title": "Git guard",
+      "description": "Refuses once git commands that throw away uncommitted work (reset --hard, checkout --, restore, clean -f, stash drop) when the tree is dirty, and force pushes, listing what would be lost. Running the command again goes through.",
+      "default": true
+    },
     "receipts": {
       "type": "boolean",
       "title": "Receipts",
