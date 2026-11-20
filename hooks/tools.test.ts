@@ -25,7 +25,7 @@ test('a big JSON is pointed to jq once, by Read or by cat', async ($, on) => {
   world(on, ['jq'], 100_000)
   on('tool.call', () => ({ result: '{}' }))
   await $.command.run({ command: 'van-code', args: '' } as never)
-  for (let i = 0; i < 50; i++) await Promise.resolve() // the equipment check runs in the background
+  for (let i = 0; i < 200; i++) await Promise.resolve() // the equipment check runs in the background
   const read = () => $.tool.call({ tool: 'Read', file_path: '/d/data.json' })
   expect((await read()).deny).toContain('jq keys')
   expect((await read()).deny).toBeUndefined() // insisting goes through

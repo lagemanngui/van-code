@@ -14,6 +14,7 @@ export const RECS = [
   { id: 'shellcheck', desc: 'finds real bugs in shell scripts after each edit', isOptional: true },
   { id: 'jq', desc: 'slices big JSON instead of reading it whole', isOptional: true },
   { id: 'ast-grep', desc: 'searches code by its structure, not by regex', isOptional: true },
+  { id: 'infra', desc: 'checks Terraform, Helm and Kubernetes files right after each edit', isOptional: true },
   { id: 'indra', desc: 'PDFs and scans as text, local OCR (free for personal use and companies under US$20M)', isOptional: true },
 ] as const
 export type RecId = (typeof RECS)[number]['id']
@@ -37,6 +38,25 @@ export const setCwd = (dir: string) => {
   cwd = dir
 }
 export let langs: typeof LANGS = []
+
+// Infra checkers by the files the project tracks; `bins` is any one of them, `brew` installs the first.
+// Terraform left Homebrew core over its license: OpenTofu (`tofu`) stands in.
+const INFRA = [
+  { name: 'Terraform', globs: ['*.tf', '*.tofu'], bins: ['terraform', 'tofu'], brew: 'opentofu' },
+  { name: 'Helm', globs: ['*Chart.yaml'], bins: ['helm'], brew: 'helm' },
+  { name: 'Kubernetes', globs: ['*k8s/*.yaml', '*kubernetes/*.yaml', '*manifests/*.yaml', '*k8s/*.yml'], bins: ['kubeconform'], brew: 'kubeconform' },
+] as const
+export let infra: (typeof INFRA)[number][] = []
+
+// shortcut: only git-tracked files are seen; a folder outside git finds no infra.
+async function detectInfra($: EngineInterface) {
+  const tracks = async (root: string, globs: readonly string[]) => {
+    const r = await run($, ['git', '-C', root, 'ls-files', '--', ...globs])
+    return r.ok && r.out.trim() !== ''
+  }
+  const found = await Promise.all(INFRA.map(async i => (await Promise.all(roots.map(r => tracks(r, i.globs)))).some(Boolean)))
+  infra = INFRA.filter((_, n) => found[n])
+}
 let plugins: { id: string; enabled: boolean }[] = []
 
 // Runs a host command; a command that cannot start counts as a failure.
@@ -60,15 +80,33 @@ async function loadPlugins($: EngineInterface) {
 
 const isEnabled = (id: string) => plugins.some(p => p.id === id && p.enabled)
 
+// Where projects live: the folder Claude runs in and, for a folder that holds several
+// repos side by side (not a monorepo), each repo one level down.
+const ROOTS_MAX = 100 // shortcut: a folder with more repos than this is scanned in part
+export let roots: string[] = []
+export async function findRoots($: EngineInterface): Promise<string[]> {
+  const entries = await $.fs.list(cwd).catch(() => [])
+  const subs = entries.filter(e => e.kind === 'dir' && !e.name.startsWith('.') && e.name !== 'node_modules').slice(0, ROOTS_MAX)
+  const isRepo = await Promise.all(subs.map(e => $.fs.exists(`${cwd}/${e.name}/.git`).catch(() => false)))
+  return [cwd, ...subs.filter((_, i) => isRepo[i]).map(e => `${cwd}/${e.name}`)]
+}
+
+// What the folder holds: its repos, their languages and their infra files.
+export async function detectProjects($: EngineInterface) {
+  roots = await findRoots($)
+  await Promise.all([detectLangs($), detectInfra($)])
+}
+
 async function detectLangs($: EngineInterface) {
   const found = await Promise.all(
     LANGS.map(async l => {
-      for (const m of l.markers) {
-        try {
-          await $.fs.stat(`${cwd}/${m}`)
-          return true
-        } catch {}
-      }
+      for (const root of roots)
+        for (const m of l.markers) {
+          try {
+            await $.fs.stat(`${root}/${m}`)
+            return true
+          } catch {}
+        }
       return false
     }),
   )
@@ -96,6 +134,11 @@ async function check($: EngineInterface, id: RecId): Promise<Status> {
   }
   if (id === 'ponytail') return ok(isEnabled('ponytail@ponytail'))
   if (id === 'indra') return ok(await hasBin($, 'indra-ocr'))
+  if (id === 'infra') {
+    if (infra.length === 0) return 'none'
+    const each = await Promise.all(infra.map(async i => (await Promise.all(i.bins.map(b => hasBin($, b)))).some(Boolean)))
+    return ok(each.every(Boolean))
+  }
   if (BREW_TOOLS.includes(id)) return ok(await hasBin($, id))
   return ok(isEnabled(`${id}@${OFFICIAL}`))
 }
@@ -142,6 +185,15 @@ export async function install($: EngineInterface, id: RecId): Promise<string> {
     }
     return out.join('\n')
   }
+  if (id === 'infra') {
+    const out: string[] = []
+    for (const i of infra) {
+      if ((await Promise.all(i.bins.map(b => hasBin($, b)))).some(Boolean)) continue
+      const isOk = (await run($, ['brew', 'install', i.brew], 600_000)).ok
+      out.push(isOk ? `infra ${i.name}: ${i.brew} installed` : `infra ${i.name}: \`brew install ${i.brew}\` failed (is Homebrew installed?)`)
+    }
+    return out.join('\n') || 'infra: nothing to install'
+  }
   if (BREW_TOOLS.includes(id)) {
     return (await run($, ['brew', 'install', id], 600_000)).ok ? `${id}: installed` : `${id}: \`brew install ${id}\` failed (is Homebrew installed?)`
   }
@@ -174,7 +226,7 @@ export const isLacking = () => RECS.some(r => !r.isOptional && status[r.id] === 
 export async function checkAll($: EngineInterface) {
   for (const r of RECS) status[r.id] = 'checking'
   $.ui.invalidate('ui.render')
-  await Promise.all([loadPlugins($), detectLangs($)])
+  await Promise.all([loadPlugins($), detectProjects($)])
   await Promise.all(
     RECS.map(async r => {
       status[r.id] = await check($, r.id)

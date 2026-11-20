@@ -77,6 +77,31 @@ export async function checkFile(
     if (!sc) return { tool: 'bash -n', isClean: true }
     return { tool: 'shellcheck', isClean: sc.code === 0, errors: sc.code === 0 ? undefined : sc.out.slice(0, 2000) }
   }
+  if (/\.(tf|tofu)$/.test(file)) {
+    // validate needs `init` (providers); without it, fmt still parses and catches syntax errors
+    const isInit = await exists($, `${dirOf(file)}/.terraform`)
+    for (const bin of ['terraform', 'tofu']) {
+      const r = isInit
+        ? await exec([bin, 'validate', '-no-color'], dirOf(file))
+        : await exec([bin, 'fmt', '-no-color', '-write=false', '-list=false', file], dirOf(file))
+      if (!r) continue // not installed: try the next
+      return { tool: `${bin} ${isInit ? 'validate' : 'fmt'}`, isClean: r.code === 0, errors: r.code === 0 ? undefined : r.out.slice(0, 2000) }
+    }
+    return undefined
+  }
+  if (/\.ya?ml$/.test(file)) {
+    // a chart's templates are Go templates, not YAML: lint the whole chart
+    const chart = await findUp($, dirOf(file), 'Chart.yaml')
+    if (chart) {
+      const r = await exec(['helm', 'lint', chart], chart)
+      return r && { tool: 'helm lint', isClean: r.code === 0, errors: r.code === 0 ? undefined : r.out.split('\n').filter(l => /\[(ERROR|WARNING)\]|Error/.test(l)).slice(0, CHECK_LINES).join('\n') || r.out.slice(0, 2000) }
+    }
+    // only Kubernetes manifests: a workflow or compose file has no apiVersion and kind
+    const text = await $.fs.read(file).catch(() => '')
+    if (!/^apiVersion:/m.test(text) || !/^kind:/m.test(text)) return undefined
+    const r = await exec(['kubeconform', '-strict', '-ignore-missing-schemas', '-summary=false', file], dirOf(file))
+    return r && { tool: 'kubeconform', isClean: r.code === 0, errors: r.code === 0 ? undefined : r.out.slice(0, 2000) }
+  }
   return undefined // shortcut: Rust and others unchecked; cargo check is too slow per edit.
 }
 
@@ -102,10 +127,24 @@ async function importersOf($: EngineInterface, root: string, file: string): Prom
   return r.ok ? r.out.split('\n').filter(Boolean) : []
 }
 
-// Tests reaching `files` (absolute) through imports, repo-relative.
-export async function affectedTests($: EngineInterface, files: string[]): Promise<{ root: string; tests: string[] }> {
-  const top = await run($, ['git', '-C', cwd, 'rev-parse', '--show-toplevel'])
-  const root = top.ok ? top.out.trim() : cwd
+// Tests reaching `files` (absolute) through imports, repo-relative, per repository:
+// files from sibling repos are each searched in their own repo.
+export async function affectedTests($: EngineInterface, files: string[]): Promise<{ root: string; tests: string[] }[]> {
+  const byRoot = new Map<string, string[]>()
+  for (const f of files) {
+    const top = await run($, ['git', '-C', f.startsWith('/') ? dirOf(f) : cwd, 'rev-parse', '--show-toplevel'])
+    const root = top.ok ? top.out.trim() : cwd
+    byRoot.set(root, [...(byRoot.get(root) ?? []), f])
+  }
+  const groups: { root: string; tests: string[] }[] = []
+  for (const [root, group] of byRoot) groups.push({ root, tests: await testsIn($, root, group) })
+  return groups
+}
+
+// Every test path, absolute, for matching against what a command names.
+export const allTests = (groups: { root: string; tests: string[] }[]) => groups.flatMap(g => g.tests.map(t => `${g.root}/${t}`))
+
+async function testsIn($: EngineInterface, root: string, files: string[]): Promise<string[]> {
   const tests = new Set<string>()
   const seen = new Set<string>()
   let frontier = files.map(f => (f.startsWith(root + '/') ? f.slice(root.length + 1) : f))
@@ -126,7 +165,7 @@ export async function affectedTests($: EngineInterface, files: string[]): Promis
     }
     frontier = next
   }
-  return { root, tests: [...tests].sort() }
+  return [...tests].sort()
 }
 
 const syntaxCheck = (f: string) =>
@@ -136,11 +175,22 @@ const syntaxCheck = (f: string) =>
   : /\.tsx?$/.test(f) ? 'tsc --noEmit'
   : `the compiler or linter on ${f}`
 
-export async function testsText($: EngineInterface, files: string[]): Promise<string> {
+export async function testsText($: EngineInterface, files: string[], known?: { root: string; tests: string[] }[]): Promise<string> {
   if (files.length === 0) return 'No code files were edited in this session; pass files to check.'
-  const { root, tests } = await affectedTests($, files)
-  if (tests.length === 0)
-    return `No tests import ${files.join(', ')} (searched ${IMPORT_DEPTH} import levels under ${root}). No test to write for this: a syntax check is enough, such as ${files.map(syntaxCheck).join('; ')}.`
-  return `Tests that reach ${files.join(', ')} (repo root ${root}):\n${tests.join('\n')}\nRun only these with the project's test runner.`
+  const groups = known ?? (await affectedTests($, files))
+  const roots = groups.map(g => g.root).join(', ')
+  if (groups.every(g => g.tests.length === 0))
+    return `No tests import ${files.join(', ')} (searched ${IMPORT_DEPTH} import levels under ${roots}). No test to write for this: a syntax check is enough, such as ${files.map(syntaxCheck).join('; ')}.`
+  const found = groups.filter(g => g.tests.length > 0)
+  const lines = found.map(g => `${groups.length > 1 ? `In ${g.root}:\n` : ''}${g.tests.join('\n')}`).join('\n')
+  return `Tests that reach ${files.join(', ')} (repo root ${roots}):\n${lines}\nRun only these with the project's test runner${groups.length > 1 ? ', in each repository' : ''}.`
 }
+
+// Test files a shell command names: a run of chosen tests, as opposed to the whole suite.
+export const namedTests = (command: string) =>
+  command.split(/\s+/).map(t => t.replace(/^['"]|['"]$/g, '').replace(/::.*$/, '')).filter(t => IS_TEST.test(t) && /\.\w+$/.test(t))
+
+// Whether one of `named` is one of `tests` (absolute), by path suffix: commands name them relative.
+export const reachesAny = (named: string[], tests: string[]) =>
+  named.some(n => tests.some(t => t === n || t.endsWith(`/${n.replace(/^\.\//, '')}`)))
 

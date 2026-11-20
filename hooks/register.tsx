@@ -1,8 +1,9 @@
-import type { EngineInterface, ModelUsage, PluginOptions, Register } from 'claude-code'
+import type { EngineInterface, ModelUsage, PluginOptions, Register, SessionMessage, ToolResultSummary } from 'claude-code'
 
-import { affectedTests, checkFile, testsText } from './checks.js'
+import { affectedTests, allTests, checkFile, namedTests, reachesAny, testsText } from './checks.js'
+import { judgeInfra } from './infra.js'
 import { isCovered, parseShellRead, type Range, readRange, resolvePath } from './reads.js'
-import { checkAll, install, isLacking, langs, RECS, run, setCwd, status } from './factory.js'
+import { checkAll, cwd, infra, install, isLacking, langs, RECS, roots, run, setCwd, status } from './factory.js'
 import { type Cell, cells, LAST, MAX_W, MIN_W, pixels } from './intro.js'
 import {
   animateUsage,
@@ -62,6 +63,60 @@ const stats = {
   suggestTaken: 0,
   haikuIn: 0,
   haikuOut: 0,
+  infraBlocked: 0,
+  restores: 0,
+  proofGaps: 0,
+  trimmedTokens: 0,
+}
+
+// Infra guard: live-infra changes wait for a preview (plan, diff, dry run) of their family.
+const previewed = new Set<string>()
+
+// Compaction restore: the person's own words and the ledger, put back after a compaction,
+// since summaries silently drop constraints and the reasons behind decisions.
+const ASKS_MAX = 4_000 // chars of the person's messages kept, newest first
+let asks: string[] = []
+let restore: string | undefined
+const KEEP_INSTRUCTIONS =
+  'Keep, word for word, every constraint, prohibition and acceptance criterion the user stated, every repository, service and environment the task involves, and the reason behind each decision taken so far.'
+
+// Compaction trim: old bulky tool output is cut before the summarizer reads it. Masking old
+// observations matches summarizing them at a fraction of the cost (The Complexity Trap, 2025).
+const TRIM_KEEP = 12 // newest messages left whole: the summary leans on them, and core may keep them
+const TRIM_OVER = 2_000 // chars: a tool output longer than this is cut
+const TRIM_HEAD = 600 // chars of it kept
+export function trimOld(messages: readonly SessionMessage[]): { messages: SessionMessage[]; cut: number } {
+  let cut = 0
+  const isBulky = (r: ToolResultSummary) => !r.isError && r.text.length > TRIM_OVER // errors stay whole: they explain decisions
+  const out = messages.map((m, i) => {
+    if (i >= messages.length - TRIM_KEEP || m.role !== 'user' || !m.toolResults?.some(isBulky)) return m
+    const toolResults = m.toolResults.map(r => {
+      if (!isBulky(r)) return r
+      cut += r.text.length - TRIM_HEAD
+      return { tool_use_id: r.tool_use_id, isError: r.isError, text: `${r.text.slice(0, TRIM_HEAD)}\n[... ${r.text.length - TRIM_HEAD} chars of old tool output cut before compaction]` }
+    })
+    // without its handle the engine builds the message from these fields, not its own copy
+    const { handle: _handle, ...rest } = m
+    return { ...rest, toolResults }
+  })
+  return { messages: out, cut }
+}
+
+function restoreText() {
+  const kept: string[] = []
+  let size = 0
+  for (const a of [...asks].reverse()) {
+    if (size + a.length > ASKS_MAX) break
+    kept.unshift(a)
+    size += a.length
+  }
+  const parts = [
+    kept.length > 0 &&
+      `The user's own messages in this session, verbatim${kept.length < asks.length ? ' (oldest left out)' : ''}:\n${kept.map(a => `> ${a.replace(/\n/g, '\n> ')}`).join('\n\n')}`,
+    !isLedgerEmpty() && `Assumption ledger:\n${ledgerText()}`,
+  ].filter(Boolean)
+  if (parts.length === 0) return undefined
+  return `[Jean-Claude Van Code] The conversation was just compacted. Re-read what follows; it outranks the summary where they differ.\n\n${parts.join('\n\n')}`
 }
 let lastSuggested = ''
 let usageMinute: { cancel: () => void } | undefined
@@ -80,7 +135,15 @@ function statsText() {
     `PDFs pointed to Indra OCR: ${stats.pdfsToOcr} · ${status.indra === 'ok' ? 'indra installed' : 'indra not installed'}`,
     `Big JSON pointed to jq: ${stats.jsonToJq} · ${status.jq === 'ok' ? 'jq installed' : 'jq not installed'}`,
     `Loops caught (the same command failing ${LOOP_FAILS} times in a row): ${stats.loopsCaught}`,
+    `Infra changes held for a preview: ${stats.infraBlocked} · infra guard ${onOff(isOn('infraGuard'))}`,
+    `Test runs that missed the edited code: ${stats.proofGaps} · prove it ${onOff(isOn('proveIt'))}`,
+    `Old tool output cut before compactions: ~${k(stats.trimmedTokens)} tokens the summarizer did not read · compaction trim ${onOff(isOn('compactTrim'))}`,
+    `Restored after a compaction: ${stats.restores} · compaction restore ${onOff(isOn('compactRestore'))}`,
     lastTask ? `Last request: ${lastTask}` : 'Last request: none finished yet',
+    `Session: ${tokensLine(tokens)}`,
+    sessionCost !== undefined && requestsDone > 0
+      ? `Average per request: ~US$ ${(sessionCost / requestsDone).toFixed(2)} over ${requestsDone} (cost includes the mod's Haiku calls)`
+      : 'Average per request: no cost figure yet',
     `Errors caught right after an edit: ${stats.checkCatches} (type or syntax errors the post-edit check found in an edited file · post-edit check ${onOff(isOn('postEditCheck'))})`,
     `Chong Li: ${stats.chongRuns} reviews, ${stats.chongFindings} findings`,
     `Mod suggestions: ${stats.suggestShown} shown, ${stats.suggestTaken} taken`,
@@ -98,6 +161,17 @@ let isGuardOn = true
 const CODE_FILE = /\.(ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|kt|swift|c|h|cpp|cs|php|scala|sh|vue|svelte|gd|lua|ex|exs|dart)$/
 const VERIFY =
   /\b(test|tests|pytest|jest|vitest|mocha|tsc|build|lint|eslint|check|validate|cargo|go (test|build|vet)|make|gradle|mvn|swift (build|test)|xcodebuild|ruff|mypy|rspec|shellcheck|py_compile)\b|\b(ba|z|da)?sh -n\b/
+// Commands that only read or record: `cat a.test.ts` or `git commit -m "tests"` verify nothing.
+const READERS = new Set(['cat', 'head', 'tail', 'less', 'more', 'bat', 'sed', 'awk', 'grep', 'rg', 'ag', 'ls', 'find', 'fd', 'wc', 'diff', 'echo', 'printf', 'git', 'jq', 'open', 'code', 'vim', 'nano'])
+// The parts of a shell command that run a test, build or check.
+export function verifySegments(command: string): string[] {
+  return command
+    .split(/&&|\|\||[;|\n]/)
+    .map(s => s.trim().replace(/^(rtk( bypass)?|time|(\w+=\S+\s+)+)\s*/, '').trim())
+    .filter(s => !READERS.has(s.split(/\s+/)[0] ?? '') && VERIFY.test(s))
+}
+// Infra files get the post-edit check too, but are not code for "prove it".
+const INFRA_FILE = /\.(tf|tofu|ya?ml)$/
 let hasUnverifiedEdit = false
 // Notes the model reads with the person's next message.
 let notes: string[] = []
@@ -106,12 +180,21 @@ const NOTE =
 
 // Assumption ledger: what a plan rests on, each checked before code is written.
 type Assumption = { id: number; text: string; state: 'open' | 'true' | 'false'; evidence?: string }
+// Targets: every repo, service or contract the change must reach. Stopping once one repo
+// is green is the main way multi-repo work ends incomplete.
+type Target = { id: number; text: string; state: 'open' | 'done' | 'na'; note?: string }
 type LedgerInput = {
   reset?: boolean
   add?: string[]
   verify?: { id: number; holds: boolean; evidence: string }[]
+  targets?: string[]
+  mark?: { id: number; state: 'done' | 'na'; note: string }[]
 }
 let ledger: Assumption[] = []
+let targets: Target[] = []
+const isPathTarget = (t: Target) => t.text.startsWith('/')
+const isLedgerOpen = () => ledger.some(a => a.state === 'open') || targets.some(t => t.state === 'open')
+const isLedgerEmpty = () => ledger.length === 0 && targets.length === 0
 let isLedgerShown = false // shown from its first entry until a new message finds nothing open
 const LEDGER_TOOL_RX = /^mcp__van-code__assumptions$/
 const DONE_CLAIM = /\b(pronto|funciona|feito|conclu[ií]d[oa]|resolvid[oa]|corrigid[oa]|done|works|fixed|complete[d]?)\b/i
@@ -119,22 +202,47 @@ const LEDGER_DESC = `Assumption ledger. For a non-trivial task (several files, a
 1. reset: true, then add: every assumption the plan rests on, one fact each ("fs.stat rejects on a missing path", "only X calls Y").
 2. Check each with the cheapest proof (read the types or docs, grep, run one line) and record verify: { id, holds, evidence } with the evidence in a few words.
 3. An assumption that does not hold means re-plan before coding.
-Do not claim the work is done while any assumption is still open; name the open ones instead. Returns the ledger.`
+4. When the change spans several repositories, services or contracts (API, schema, event, config), list each in targets, a repository as its absolute path. Mark each done (with what changed) or na (with why) before saying the work is done; an edit inside a path target marks it done by itself.
+Do not claim the work is done while any assumption or target is still open; name the open ones instead. Returns the ledger.`
 
 function ledgerText() {
-  if (ledger.length === 0) return 'Ledger is empty.'
-  return ledger
-    .map(a => `#${a.id} [${a.state === 'open' ? 'OPEN' : a.state === 'true' ? 'HOLDS' : 'FALSE'}] ${a.text}${a.evidence ? ` (evidence: ${a.evidence})` : ''}`)
-    .join('\n')
+  if (isLedgerEmpty()) return 'Ledger is empty.'
+  const lines = ledger.map(
+    a => `#${a.id} [${a.state === 'open' ? 'OPEN' : a.state === 'true' ? 'HOLDS' : 'FALSE'}] ${a.text}${a.evidence ? ` (evidence: ${a.evidence})` : ''}`,
+  )
+  if (targets.length > 0) {
+    lines.push('Targets:')
+    lines.push(...targets.map(t => `T${t.id} [${t.state === 'open' ? 'OPEN' : t.state === 'done' ? 'DONE' : 'N/A'}] ${t.text}${t.note ? ` (${t.note})` : ''}`))
+  }
+  return lines.join('\n')
 }
 
 function applyLedger(input: LedgerInput) {
-  if (input.reset) ledger = []
+  if (input.reset) {
+    ledger = []
+    targets = []
+  }
   for (const text of input.add ?? []) ledger.push({ id: ledger.length + 1, text, state: 'open' })
   for (const v of input.verify ?? []) {
     const a = ledger.find(x => x.id === v.id)
     if (a) Object.assign(a, { state: v.holds ? 'true' : 'false', evidence: v.evidence })
   }
+  for (const text of input.targets ?? []) targets.push({ id: targets.length + 1, text: text.replace(/\/+$/, ''), state: 'open' })
+  for (const m of input.mark ?? []) {
+    const t = targets.find(x => x.id === m.id)
+    if (t) Object.assign(t, { state: m.state, note: m.note })
+  }
+}
+
+// An edit inside a path target reaches it.
+function touchTargets(file: string) {
+  let isChanged = false
+  for (const t of targets)
+    if (t.state === 'open' && isPathTarget(t) && file.startsWith(`${t.text}/`)) {
+      Object.assign(t, { state: 'done', note: `edited ${file.slice(t.text.length + 1)}` })
+      isChanged = true
+    }
+  return isChanged
 }
 
 // Context alarm: warn once past 60%, re-arm under 50% (after a /compact or /clear).
@@ -190,6 +298,31 @@ const failing = new Map<string, { command: string; count: number }>()
 // The last finished request: what it cost and how much it did.
 let task = { costUsd: 0, startedAt: 0, toolCalls: 0 }
 let lastTask = ''
+
+// Where the input tokens went, per model request (subagents included): billed cost is
+// mostly cache traffic, so a cut in tool output can save tokens and still cost more.
+type Tokens = { requests: number; input: number; cacheRead: number; cacheWrite: number; output: number }
+export const noTokens = (): Tokens => ({ requests: 0, input: 0, cacheRead: 0, cacheWrite: 0, output: 0 })
+const tokens = noTokens()
+let taskTokens = noTokens()
+let requestsDone = 0 // person's requests finished this session, for the average cost
+let sessionCost: number | undefined // US$, from the engine's ledger at the last measure
+export function addTokens(u: ModelUsage, into: Tokens[] = [tokens, taskTokens]) {
+  for (const t of into) {
+    t.requests += 1
+    t.input += u.input_tokens
+    t.cacheRead += u.cache_read_input_tokens
+    t.cacheWrite += u.cache_creation_input_tokens
+    t.output += u.output_tokens
+  }
+}
+// Share of the input the cache served.
+const hitRate = (t: Tokens) => {
+  const all = t.input + t.cacheRead + t.cacheWrite
+  return all === 0 ? 0 : Math.round((t.cacheRead / all) * 100)
+}
+export const tokensLine = (t: Tokens) =>
+  `${t.requests} model requests · input ${k(t.input)} uncached, ${k(t.cacheRead)} cache read, ${k(t.cacheWrite)} cache write (${hitRate(t)}% from cache) · output ${k(t.output)}`
 const duration = (ms: number) => (ms >= 60_000 ? `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s` : `${Math.round(ms / 1000)}s`)
 
 async function refreshStatus($: EngineInterface) {
@@ -317,6 +450,7 @@ async function remember($: EngineInterface, agentId: string | undefined, file: s
 const TESTS_TOOL_RX = /^mcp__van-code__affected_tests$/
 const editedFiles = new Set<string>() // code files edited this session
 let turnEdited = new Set<string>()
+let ranTests: string[] = [] // test files named by test commands since the last code edit
 const syntaxClean = new Set<string>() // files whose last post-edit check passed
 
 // Follow-up suggestions: when the engine shows none after a turn, propose one.
@@ -407,6 +541,23 @@ export const register: Register = (on, opts) => {
         properties: {
           reset: { type: 'boolean', description: 'Start a new ledger for a new task' },
           add: { type: 'array', items: { type: 'string' }, description: 'Assumptions to record, one fact each' },
+          targets: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Repositories (absolute path), services or contracts the change must reach',
+          },
+          mark: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'number', description: 'The target number (T1 is 1)' },
+                state: { type: 'string', enum: ['done', 'na'] },
+                note: { type: 'string', description: 'What changed there, or why it needs nothing' },
+              },
+              required: ['id', 'state', 'note'],
+            },
+          },
           verify: {
             type: 'array',
             items: {
@@ -423,6 +574,12 @@ export const register: Register = (on, opts) => {
       },
     })
     reads.clear()
+    asks = []
+    restore = undefined
+    previewed.clear()
+    Object.assign(tokens, noTokens()) // /clear starts the session's figures over
+    requestsDone = 0
+    sessionCost = undefined
     isGuardOn = isOn('guard')
     if (isOn('intro')) {
       play($)
@@ -529,16 +686,60 @@ export const register: Register = (on, opts) => {
     return ran
   }).catch(($, e, next) => next(e))
 
-  // After a compaction the model has really forgotten what it read.
+  // Live infrastructure: a change waits for a preview of its family, a destroy is refused once.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    if (!isOn('infraGuard')) return next(e)
+    const found = judgeInfra(e.command)
+    const held = found.find(v => (v.kind === 'change' && !previewed.has(v.family)) || v.kind === 'destroy')
+    const key = `infra|${e.command.trim()}`
+    if (held && !onceWarned.has(key)) {
+      onceWarned.add(key)
+      stats.infraBlocked += 1
+      $.ui.toast(`Infra ${held.kind} held: Claude was told to preview it first`)
+      return {
+        deny:
+          `Jean-Claude Van Code: this ${held.kind === 'destroy' ? 'deletes' : 'changes'} live infrastructure (${held.family}). ` +
+          `Preview it first: ${held.hint}. Check the target (context, project, account, workspace) is the one the user means. ` +
+          'If the user asked for this exact action, or the preview matches it, run the same command again and it will go through.',
+      }
+    }
+    const ran = await next(e)
+    if (ran.deny === undefined && !ran.isError) for (const v of found) if (v.kind === 'preview') previewed.add(v.family)
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  // After a compaction the model has really forgotten what it read, and may have lost constraints.
   on('session.compact', async ($, e, next) => {
-    const r = await next(e)
+    const isMain = !e.agentId && isOn('compactRestore')
+    const instructions = isMain ? [e.instructions, KEEP_INSTRUCTIONS].filter(Boolean).join('\n') : e.instructions
+    const trimmed = isOn('compactTrim') ? trimOld(e.messages) : undefined
+    let r: Awaited<ReturnType<typeof next>>
+    if (trimmed && trimmed.cut > 0) {
+      try {
+        r = await next({ ...e, instructions, messages: trimmed.messages })
+        if (r.skip === undefined) stats.trimmedTokens += Math.round(trimmed.cut / 4)
+      } catch {
+        r = await next({ ...e, instructions }) // the engine refused the rebuilt messages: compact as it was
+      }
+    } else r = await next({ ...e, instructions })
+    if (e.agentId || r.skip !== undefined) return r
     reads.clear()
+    // precompute keeps a summary for later; the real compaction fires again
+    if (isMain && e.trigger !== 'precompute') {
+      restore = restoreText()
+      if (restore) stats.restores += 1
+    }
     return r
   })
 
   on('tool.call', async ($, e, next) => {
-    const ran = await next(e)
+    let ran = await next(e)
     if (ran.deny !== undefined) return ran
+    // an auto-compaction mid-turn: the restore rides on the next tool result, not a turn later
+    if (restore && !e.agentId) {
+      ran = { ...ran, context: [...(ran.context ?? []), restore] }
+      restore = undefined
+    }
     task.toolCalls += 1
     if (e.tool === 'Bash') {
       const who = e.agentId ?? 'main'
@@ -563,9 +764,11 @@ export const register: Register = (on, opts) => {
     }
     if ((e.tool === 'Edit' || e.tool === 'Write') && CODE_FILE.test(e.file_path)) {
       hasUnverifiedEdit = true
+      ranTests = [] // tests run before this edit prove nothing about it
       editedFiles.add(e.file_path)
       turnEdited.add(e.file_path)
     }
+    if ((e.tool === 'Edit' || e.tool === 'Write') && !ran.isError && touchTargets(e.file_path)) $.ui.invalidate('ui.render')
     if (e.tool === 'Edit' && CODE_FILE.test(e.file_path)) {
       const minus = e.old_string.split('\n').map(l => `- ${l}`).join('\n')
       const plus = e.new_string.split('\n').map(l => `+ ${l}`).join('\n')
@@ -574,8 +777,14 @@ export const register: Register = (on, opts) => {
     if (e.tool === 'Write' && CODE_FILE.test(e.file_path)) {
       recordChange(e.file_path, `+++ ${e.file_path} (whole file)\n${e.content}`, lineCount(e.content))
     }
-    if (e.tool === 'Bash' && VERIFY.test(e.command)) hasUnverifiedEdit = false
-    if (isOn('postEditCheck') && (e.tool === 'Edit' || e.tool === 'Write') && CODE_FILE.test(e.file_path) && !ran.isError) {
+    const verifies = e.tool === 'Bash' ? verifySegments(e.command) : []
+    if (verifies.length > 0) {
+      // a run of chosen tests proves the change only if one of them reaches it: judged at turn end
+      const named = verifies.flatMap(namedTests)
+      if (named.length > 0) ranTests.push(...named)
+      else hasUnverifiedEdit = false
+    }
+    if (isOn('postEditCheck') && (e.tool === 'Edit' || e.tool === 'Write') && (CODE_FILE.test(e.file_path) || INFRA_FILE.test(e.file_path)) && !ran.isError) {
       const found = await checkFile($, e.file_path)
       // a clean type-check is a verification; a syntax-only pass is not
       if (found?.isClean && (found.tool === 'tsc' || found.tool === 'go vet')) hasUnverifiedEdit = false
@@ -600,8 +809,9 @@ export const register: Register = (on, opts) => {
     if (isReviewing) return { text: 'Chong Li is already reviewing, hold on.', isTextDisplayOnly: true }
     let diff = takeUnreviewed()
     if (!diff) {
-      const git = await run($, ['git', 'diff', 'HEAD'])
-      diff = git.ok ? git.out : ''
+      // every repo Claude works in: a folder of side-by-side repos has no diff of its own
+      const each = await Promise.all((roots.length ? roots : [cwd]).map(r => run($, ['git', '-C', r, 'diff', 'HEAD'])))
+      diff = each.filter(g => g.ok).map(g => g.out).join('\n')
     }
     if (!diff.trim()) return { text: 'Chong Li has nothing to attack: no code changes.', isTextDisplayOnly: true }
     const found = await chongLi($, diff)
@@ -633,6 +843,8 @@ export const register: Register = (on, opts) => {
     if (isOn('proveIt') && !e.agentId && hasUnverifiedEdit) {
       hasUnverifiedEdit = false
       const touched = [...turnEdited]
+      const ran = ranTests
+      ranTests = []
       const nag = () => {
         notes.push(NOTE)
         $.ui.toast('Code edited with no test or build run: Claude will be asked to verify next turn')
@@ -642,17 +854,33 @@ export const register: Register = (on, opts) => {
       else
         void (async () => {
           const isAllClean = touched.every(f => syntaxClean.has(f))
-          if (isAllClean && (await affectedTests($, touched)).tests.length === 0) return
-          nag()
-          notes.push(await testsText($, touched))
+          // nothing ran and no clean check: no search needed to know it is unproven
+          const isUnproven = ran.length === 0 && !isAllClean
+          if (isUnproven) nag()
+          const groups = await affectedTests($, touched)
+          const tests = allTests(groups)
+          if (isAllClean && tests.length === 0) return
+          if (ran.length > 0 && reachesAny(ran, tests)) return
+          if (isUnproven) {
+            // already asked
+          } else if (ran.length > 0) {
+            stats.proofGaps += 1
+            notes.push(
+              `[Jean-Claude Van Code] In the previous turn you edited code and ran only ${ran.join(', ')}, which ${ran.length > 1 ? 'do' : 'does'} not import the files you changed, so ${ran.length > 1 ? 'they prove' : 'it proves'} nothing about the change. Run the tests that reach it, and say what you ran.`,
+            )
+            $.ui.toast('The tests Claude ran do not reach the edited code: it will be asked to run the right ones')
+          } else nag()
+          notes.push(await testsText($, touched, groups))
         })().catch(nag)
     }
     if (!e.agentId) turnEdited = new Set()
     if (!e.agentId && task.startedAt) {
       const done = { ...task }
+      const used = taskTokens
+      requestsDone += 1
       void $.session.usage().then(u => {
         const cost = u.cost ? `~US$ ${(u.cost.usd - done.costUsd).toFixed(2)}, ` : ''
-        lastTask = `${cost}${done.toolCalls} tool calls, ${duration(Date.now() - done.startedAt)}`
+        lastTask = `${cost}${done.toolCalls} tool calls, ${duration(Date.now() - done.startedAt)}, ${used.requests} model requests, ${hitRate(used)}% of input from cache`
       }).catch(() => {})
     }
     if (isOn('suggestions') && !e.agentId && 'answer' in e) {
@@ -661,10 +889,19 @@ export const register: Register = (on, opts) => {
       suggestWait = $.clock.after(SUGGEST_WAIT, () => void suggestFollowUp($, answer).catch(() => {}))
     }
     const open = ledger.filter(a => a.state === 'open')
-    if (!e.agentId && open.length > 0 && 'answer' in e && DONE_CLAIM.test(e.answer)) {
-      $.ui.toast(`Claimed done with ${open.length} unverified assumption(s)`)
+    const unreached = targets.filter(t => t.state === 'open')
+    if (!e.agentId && (open.length > 0 || unreached.length > 0) && 'answer' in e && DONE_CLAIM.test(e.answer)) {
+      $.ui.toast(`Claimed done with ${open.length} unverified assumption(s), ${unreached.length} target(s) not reached`)
       notes.push(
-        `[Jean-Claude Van Code] Your last answer claimed the work was done while these assumptions were still unverified: ${open.map(a => `#${a.id} ${a.text}`).join('; ')}. Verify them now, or tell the user plainly that they are unverified.`,
+        [
+          '[Jean-Claude Van Code] Your last answer claimed the work was done while',
+          open.length > 0 && `these assumptions were still unverified: ${open.map(a => `#${a.id} ${a.text}`).join('; ')}.`,
+          unreached.length > 0 &&
+            `${open.length > 0 ? 'And ' : ''}these targets were never reached nor marked n/a: ${unreached.map(t => `T${t.id} ${t.text}`).join('; ')}.`,
+          'Finish them now, or tell the user plainly what is left.',
+        ]
+          .filter(Boolean)
+          .join(' '),
       )
     }
     void refreshStatus($)
@@ -679,7 +916,7 @@ export const register: Register = (on, opts) => {
 
   on('tool.run', { tool: LEDGER_TOOL_RX }, ($, e) => {
     applyLedger(e as unknown as LedgerInput)
-    isLedgerShown = ledger.length > 0
+    isLedgerShown = !isLedgerEmpty()
     $.ui.invalidate('ui.render')
     return { result: ledgerText(), text: ledgerText() }
   })
@@ -692,7 +929,15 @@ export const register: Register = (on, opts) => {
     return r
   })
 
+  // Every model request, main or subagent: where its input came from (uncached, cache read, cache write).
+  on('turn.step', async function* ($, e, next) {
+    const r = yield* next(e)
+    if (r.usage) addTokens(r.usage)
+    return r
+  })
+
   on('session.measure', async ($, e, next) => {
+    if (e.cost) sessionCost = e.cost.usd
     void refreshStatus($)
     if (isOn('usageHeader')) {
       await refreshUsage($)
@@ -765,7 +1010,13 @@ export const register: Register = (on, opts) => {
     setWorking(true)
     if (isOn('usageHeader')) animateUsage($)
     lastUserText = e.text
+    if (e.text.trim()) asks.push(e.text.trim())
+    if (restore) {
+      notes.push(restore)
+      restore = undefined
+    }
     task = { costUsd: 0, startedAt: Date.now(), toolCalls: 0 }
+    taskTokens = noTokens()
     void $.session.usage().then(u => (task.costUsd = u.cost?.usd ?? 0)).catch(() => {})
     lastSent = e.text
     if (lastSuggested && e.text.trim() === lastSuggested) stats.suggestTaken += 1
@@ -776,7 +1027,7 @@ export const register: Register = (on, opts) => {
       isListShown = false
       $.ui.invalidate('ui.render')
     }
-    if (isLedgerShown && ledger.every(a => a.state !== 'open')) {
+    if (isLedgerShown && !isLedgerOpen()) {
       isLedgerShown = false
       $.ui.invalidate('ui.render')
     }
@@ -885,6 +1136,14 @@ export const register: Register = (on, opts) => {
                 <Text key="x" dimColor={a.state === 'true'}>{`${a.text}${a.evidence ? ` · ${a.evidence}` : ''}`}</Text>
               </Text>
             )),
+            ...targets.slice(-6).map(t => (
+              <Text key={`tg-${t.id}`} wrap="truncate">
+                <Text key="m" color={t.state === 'open' ? '#F5C542' : '#6cc070'}>
+                  {` ${t.state === 'open' ? '◇' : t.state === 'done' ? '◆' : '–'} `}
+                </Text>
+                <Text key="x" dimColor={t.state !== 'open'}>{`T${t.id} ${t.text}${t.note ? ` · ${t.note}` : ''}`}</Text>
+              </Text>
+            )),
           ]
     const list = isListShown
       ? [
@@ -897,7 +1156,11 @@ export const register: Register = (on, opts) => {
             const mark = st === 'ok' ? '✔' : isOffer ? '○' : st === 'missing' ? '✘' : st === 'none' ? '–' : '…'
             const color = st === 'ok' ? '#6cc070' : isOffer || st === 'none' ? undefined : st === 'missing' ? '#e06c5f' : undefined
             const desc =
-              r.id === 'lsp' && langs.length > 0 ? `${r.desc} (${langs.map(l => l.name).join(', ')})` : r.id === 'lsp' && st === 'none' ? 'no known language in this folder' : r.desc
+              r.id === 'lsp' && langs.length > 0 ? `${r.desc} (${langs.map(l => l.name).join(', ')})`
+              : r.id === 'lsp' && st === 'none' ? 'no known language in this folder'
+              : r.id === 'infra' && infra.length > 0 ? `${r.desc} (${infra.map(i => i.name).join(', ')})`
+              : r.id === 'infra' && st === 'none' ? 'no Terraform, Helm or Kubernetes files in this repo'
+              : r.desc
             const tail = isOffer ? ` · optional: /van-code-setup ${r.id}` : st === 'missing' ? ' (missing)' : ''
             return (
               <Text key={`rec-${r.id}`} wrap="truncate">

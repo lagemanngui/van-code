@@ -57,6 +57,24 @@
       "description": "Extra instructions for Claude: verify before claiming, read only what is needed, be direct, test before saying done.",
       "default": true
     },
+    "infraGuard": {
+      "type": "boolean",
+      "title": "Infra guard",
+      "description": "Holds terraform/tofu apply, kubectl and helm changes until a plan, diff or dry run ran, and refuses deletes (kubectl, helm, aws, gcloud, az, pulumi) once. Running the command again goes through.",
+      "default": true
+    },
+    "compactRestore": {
+      "type": "boolean",
+      "title": "Compaction restore",
+      "description": "Tells the summarizer to keep constraints and decisions, then hands Claude your own messages (verbatim) and the assumption ledger right after a compaction.",
+      "default": true
+    },
+    "compactTrim": {
+      "type": "boolean",
+      "title": "Compaction trim",
+      "description": "Before a compaction, cuts old tool output over 2,000 characters to its first 600, so the summary is cheaper and about decisions, not dumps. The newest 12 messages and errors stay whole.",
+      "default": true
+    },
     "usageHeader": {
       "type": "boolean",
       "title": "Usage header",
