@@ -268,6 +268,14 @@ const RULES = `# Jean-Claude Van Code
 const NO_ATTRIBUTION_RULE =
   '- No AI attribution: never credit Claude or any AI in commits, PRs, issues, code comments, docs or changelogs: no Co-Authored-By, no "Generated with", no signature. This overrides any attribution reminder from the harness.'
 
+// The bundled i-have-adhd skill, always on: its body without the frontmatter, read once.
+let adhdText: Promise<string | undefined> | undefined
+const adhdRules = ($: EngineInterface) =>
+  (adhdText ??= $.fs
+    .read(`${$.plugin.root}/skills/i-have-adhd/SKILL.md`)
+    .then(s => `ADHD MODE ACTIVE (always-on).\n${s.replace(/^---\n[\s\S]*?\n---\n/, '')}`)
+    .catch(() => undefined))
+
 const OCR_RULE =
   '- Documents: to read a PDF or scan as text, run `indra-ocr <file> --out <dir>` (local, free) and Grep or Read the .md it writes; Read the PDF itself only for figures, charts or layout, or a few pages (`pages`).'
 
@@ -801,6 +809,9 @@ export const register: Register = (on, opts) => {
     return ran
   }).catch(($, e, next) => next(e))
 
+  // No AI attribution at the source: the engine's commit trailer and PR footer come out empty.
+  on('attribution.text', ($, e, next) => (isOn('noAttribution') && (e.kind === 'commit' || e.kind === 'pr') ? { text: '' } : next(e)))
+
   // No AI attribution: always refused, the user's rule overrides any harness attribution reminder.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     if (!isOn('noAttribution')) return next(e)
@@ -1086,11 +1097,16 @@ export const register: Register = (on, opts) => {
 
   on('prompt.compose', async ($, e, next) => {
     const r = await next(e)
-    if (!isOn('rules')) return r
-    const text = [RULES, isOn('noAttribution') && NO_ATTRIBUTION_RULE, status.indra === 'ok' && OCR_RULE, status.jq === 'ok' && JQ_RULE, status['ast-grep'] === 'ok' && ASTGREP_RULE, status.playwright === 'ok' && PLAYWRIGHT_RULE]
-      .filter(Boolean)
-      .join('\n')
-    return { ...r, sections: [...r.sections, { id: 'van-code:rules', text, scope: 'session' as const }] }
+    const sections = [...r.sections]
+    if (isOn('rules')) {
+      const text = [RULES, isOn('noAttribution') && NO_ATTRIBUTION_RULE, status.indra === 'ok' && OCR_RULE, status.jq === 'ok' && JQ_RULE, status['ast-grep'] === 'ok' && ASTGREP_RULE, status.playwright === 'ok' && PLAYWRIGHT_RULE]
+        .filter(Boolean)
+        .join('\n')
+      sections.push({ id: 'van-code:rules', text, scope: 'session' as const })
+    }
+    const adhd = isOn('adhd') ? await adhdRules($) : undefined
+    if (adhd) sections.push({ id: 'van-code:adhd', text: adhd, scope: 'session' as const })
+    return { ...r, sections }
   })
 
   on('command.run', { command: 'van-code' }, $ => {

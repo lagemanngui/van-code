@@ -32,6 +32,7 @@ After installing, run `/van-code-setup` once to install the recommended tools (s
 | `/van-code-guard` | Turns the heavy-file guard off or on for this session |
 | `/van-code-scan [refresh \| install <n>...]` | Stack scan: finds what your dependencies' owners publish for AI agents (see [Stack scan](#stack-scan)). `install 1 3` installs those items of the list; `refresh` scans again instead of showing the saved result |
 | `/chong-li` | Adversarial review: Chong Li tries to find one concrete way the latest changes break |
+| `/van-code:i-have-adhd` | ADHD-friendly output: next action first, numbered steps, state restated each turn, no tangents; "stop adhd mode" ends it for the session. On in every session by default (setting `adhd`); the command turns it back on after a stop. Bundled from [ayghri/i-have-adhd](https://github.com/ayghri/i-have-adhd) (MIT) |
 
 ## What it does on its own
 
@@ -116,6 +117,7 @@ Every automatic behavior has a switch in the plugin's settings (`/config`), all 
 | `rules` | Van Code rules |
 | `infraGuard` | Infra guard |
 | `noAttribution` | No AI attribution |
+| `adhd` | ADHD mode (the bundled i-have-adhd skill, always on) |
 | `compactRestore` | Compaction restore |
 | `compactTrim` | Compaction trim |
 | `cardPlan` | Card plan |
@@ -146,4 +148,4 @@ To load a working copy instead of the installed plugin, add its folder to `CLAUD
 
 ## License
 
-MIT
+MIT. `skills/i-have-adhd` is copied unchanged from [ayghri/i-have-adhd](https://github.com/ayghri/i-have-adhd) at `1ecea19`, MIT, © 2026 Ayoub Ghriss (its `LICENSE` sits beside it).
