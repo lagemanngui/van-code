@@ -1,5 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 
+import { KITTY_APPS, kittyConf, LINUX_DEFAULT_SCRIPT, lsAlias, macDefaultScript, OPEN_ACTIONS, type Platform } from './kitty.js'
+
 // "Factory equipment": tools the mod recommends, how to check and install each.
 // `none`: nothing to recommend here (no known language in this folder).
 export type Status = 'checking' | 'ok' | 'missing' | 'none'
@@ -16,6 +18,7 @@ export const RECS = [
   { id: 'ast-grep', desc: 'searches code by its structure, not by regex', isOptional: true },
   { id: 'infra', desc: 'checks Terraform, Helm and Kubernetes files right after each edit', isOptional: true },
   { id: 'playwright', desc: 'tests web UI like a user would: Microsoft playwright-cli and its official skill', isOptional: true },
+  { id: 'kitty', desc: 'terminal with clickable file links, inline images and Shift+Enter (not made the default)', isOptional: true },
   { id: 'indra', desc: 'PDFs and scans as text, local OCR (free for personal use and companies under US$20M)', isOptional: true },
 ] as const
 export type RecId = (typeof RECS)[number]['id']
@@ -137,6 +140,71 @@ async function hasBin($: EngineInterface, bin: string) {
   return (await run($, ['which', bin])).ok
 }
 
+async function platformOf($: EngineInterface): Promise<Platform> {
+  return (await $.session.info().catch(() => undefined))?.platform ?? 'unknown'
+}
+
+async function hasKitty($: EngineInterface) {
+  if (await hasBin($, 'kitty')) return true
+  const home = await $.env.get('HOME')
+  return (await Promise.all(KITTY_APPS.map(a => $.fs.exists(a.replace('~', home ?? '~')).catch(() => false)))).some(Boolean)
+}
+
+async function makeKittyDefault($: EngineInterface, mac: boolean): Promise<string> {
+  if (mac) {
+    const r = await run($, ['osascript', '-l', 'JavaScript', '-e', macDefaultScript('net.kovidgoyal.kitty')])
+    if (!r.ok) return `kitty: could not make it the default (${r.out.trim().split('\n').at(-1)})`
+    const was = r.out.trim()
+    return `kitty: now the default terminal, for shell scripts and ssh:// links (before: ${was})`
+  }
+  const r = await run($, ['sh', '-c', LINUX_DEFAULT_SCRIPT])
+  if (!r.ok) return `kitty: could not make it the default (${r.out.trim().split('\n').at(-1)})`
+  return 'kitty: set as the default terminal for xdg-terminal-exec and GNOME; on Debian or Ubuntu also run `sudo update-alternatives --config x-terminal-emulator`'
+}
+
+// kitty: the app, then its config only where the person has none. The shell's rc file is theirs: the ls line is shown, not written.
+async function installKitty($: EngineInterface): Promise<string> {
+  const platform = await platformOf($)
+  if (platform === 'windows' || platform === 'unknown') return 'kitty: no build for this system (macOS and Linux, WSL included)'
+  const mac = platform === 'macos'
+  const brew = mac && (await hasBin($, 'brew'))
+  const out: string[] = []
+  if (!(await hasKitty($))) {
+    const argv = brew
+      ? ['brew', 'install', '--cask', 'kitty']
+      : ['sh', '-c', 'curl -fsSL https://sw.kovidgoyal.net/kitty/installer.sh | sh /dev/stdin launch=n'] // kitty's official installer
+    if (!(await run($, argv, 600_000)).ok) return `kitty: ${brew ? '`brew install --cask kitty`' : "kitty's official installer (sw.kovidgoyal.net/kitty)"} failed`
+    // the installer leaves kitty in ~/.local/kitty.app on Linux; its docs link the commands into ~/.local/bin
+    if (!mac) await run($, ['sh', '-c', 'mkdir -p ~/.local/bin && ln -sf ~/.local/kitty.app/bin/kitty ~/.local/kitty.app/bin/kitten ~/.local/bin/'])
+    out.push('kitty: installed')
+    // asked once, on a fresh install; WSL's terminal belongs to Windows
+    if (platform !== 'wsl') {
+      const answer = await $.ui
+        .ask('Make kitty your default terminal?', { header: 'kitty', options: ['No, keep the current one', 'Yes, make kitty the default'] })
+        .catch(() => '') // dismissed, or no one to ask
+      out.push(answer.startsWith('Yes') ? await makeKittyDefault($, mac) : 'kitty: not made the default terminal')
+    }
+  } else out.push('kitty: already installed')
+  if (brew) {
+    // the config's font, and GNU ls for clickable names; failures here leave kitty working
+    await run($, ['brew', 'install', '--cask', 'font-jetbrains-mono'], 600_000)
+    await run($, ['brew', 'install', 'coreutils'], 600_000)
+  }
+  const dir = `${await $.env.get('HOME')}/.config/kitty`
+  await run($, ['mkdir', '-p', dir])
+  for (const [file, text] of [['kitty.conf', kittyConf(platform)], ['open-actions.conf', OPEN_ACTIONS]] as const) {
+    if (await $.fs.exists(`${dir}/${file}`).catch(() => true)) out.push(`kitty: ${dir}/${file} exists, left as is`)
+    else {
+      await $.fs.write(`${dir}/${file}`, text)
+      out.push(`kitty: wrote ${dir}/${file}`)
+    }
+  }
+  out.push(`kitty: for clickable names in ls, add to your shell's rc file: ${lsAlias(platform)}`)
+  if (mac) out.push("kitty: if it will not open from Finder or the Dock, `xattr -dr com.apple.quarantine /Applications/kitty.app` lets it (it turns macOS's Gatekeeper check off for kitty)")
+  out.push('kitty: quit it fully and open it again, so the config takes effect')
+  return out.join('\n')
+}
+
 async function check($: EngineInterface, id: RecId): Promise<Status> {
   const ok = (b: boolean): Status => (b ? 'ok' : 'missing')
   if (id === 'rtk') {
@@ -154,6 +222,11 @@ async function check($: EngineInterface, id: RecId): Promise<Status> {
   }
   if (id === 'ponytail') return ok(isEnabled('ponytail@ponytail'))
   if (id === 'indra') return ok(await hasBin($, 'indra-ocr'))
+  if (id === 'kitty') {
+    const platform = await platformOf($)
+    if (platform === 'windows' || platform === 'unknown') return 'none' // kitty has no Windows build
+    return ok(await hasKitty($))
+  }
   if (id === 'playwright') {
     if (!hasWeb) return 'none'
     return ok((await hasBin($, 'playwright-cli')) && (await hasPlaywrightSkill($)))
@@ -233,6 +306,7 @@ export async function install($: EngineInterface, id: RecId): Promise<string> {
   if (BREW_TOOLS.includes(id)) {
     return (await run($, ['brew', 'install', id], 600_000)).ok ? `${id}: installed` : `${id}: \`brew install ${id}\` failed (is Homebrew installed?)`
   }
+  if (id === 'kitty') return installKitty($)
   if (id === 'indra') {
     // uv brings its own Python 3.10+, which indra-ocr needs; macOS ships 3.9
     const argv = (await hasBin($, 'uv'))
