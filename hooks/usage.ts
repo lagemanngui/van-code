@@ -32,7 +32,23 @@ export function bar(p: number): [string, string] {
   return ['█'.repeat(full) + part, '·'.repeat(BAR - full - (part ? 1 : 0))]
 }
 
-export const usageColor = (p: number) => (p >= 90 ? 'red' : p >= 70 ? 'yellow' : 'green')
+// Prompt cache of the main thread: when its last request went out, how long the cache holds, how big the prompt is.
+export type CacheState = { at: number; ttl?: '5m' | '1h'; tokens: number }
+export let cache: CacheState | null = null
+export const setCache = (c: CacheState | null) => {
+  cache = c
+}
+const TTL_MS = { '5m': 300_000, '1h': 3_600_000 }
+// Minutes until the cache lapses (0 = cold); undefined while no lifetime is known.
+export function cacheLeft(c: CacheState | null, now: number): number | undefined {
+  if (!c?.ttl) return undefined
+  return Math.max(0, Math.ceil((c.at + TTL_MS[c.ttl] - now) / 60000))
+}
+// The lifetime a request gave its cache: the shorter when it wrote both; a read keeps the last write's.
+export const ttlOf = (u: { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number }, prev?: '5m' | '1h') =>
+  u.ephemeral_5m_input_tokens ? '5m' : u.ephemeral_1h_input_tokens ? '1h' : prev
+
+export const usageColor =(p: number) => (p >= 90 ? 'red' : p >= 70 ? 'yellow' : 'green')
 
 export let snap: Snapshot | null = null
 export let usageFrame = 0

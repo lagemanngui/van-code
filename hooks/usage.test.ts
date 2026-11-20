@@ -1,6 +1,17 @@
 import { expect, test } from 'claude-code/testing'
 
-import { bar, left, prettyModel } from './usage'
+import { bar, cacheLeft, left, prettyModel, ttlOf } from './usage'
+
+test('cache countdown: minutes left, 0 once cold, nothing before a lifetime is known', () => {
+  const at = 1_000_000
+  expect(cacheLeft({ at, ttl: '1h', tokens: 1 }, at + 18 * 60000)).toBe(42)
+  expect(cacheLeft({ at, ttl: '5m', tokens: 1 }, at + 6 * 60000)).toBe(0)
+  expect(cacheLeft({ at, tokens: 1 }, at)).toBeUndefined()
+  expect(cacheLeft(null, at)).toBeUndefined()
+  expect(ttlOf({ ephemeral_1h_input_tokens: 10, ephemeral_5m_input_tokens: 5 })).toBe('5m')
+  expect(ttlOf({ ephemeral_1h_input_tokens: 10 })).toBe('1h')
+  expect(ttlOf({}, '1h')).toBe('1h') // a pure read keeps the last write's lifetime
+})
 
 test('countdown formats', () => {
   const now = Date.parse('2026-01-01T00:00:00Z')

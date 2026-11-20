@@ -11,15 +11,19 @@ import { type Cell, cells, LAST, MAX_W, MIN_W, pixels } from './intro.js'
 import {
   animateUsage,
   bar,
+  cache,
+  cacheLeft,
   left,
   NAMES,
   prettyModel,
   refreshUsage,
+  setCache,
   setWorking,
   shown,
   snap,
   SPIN,
   usageColor,
+  ttlOf,
   usageFrame,
 } from './usage.js'
 
@@ -256,6 +260,15 @@ function touchTargets(file: string) {
 // Context alarm: warn once past 60%, re-arm under 50% (after a /compact or /clear).
 let isContextWarned = false
 
+// Cold cache: told once per lapse, when the prompt is big enough for the rewrite to matter.
+let isColdWarned = false
+const COLD_MIN_TOKENS = 20_000
+function warnIfCold($: EngineInterface, now: number) {
+  if (isColdWarned || !cache || cache.tokens < COLD_MIN_TOKENS || cacheLeft(cache, now) !== 0) return
+  isColdWarned = true
+  $.ui.toast(`Prompt cache expired: your next message re-sends ~${k(cache.tokens)} tokens uncached. Switched topics? /clear first; else /compact sends less.`)
+}
+
 // No "think step by step" here: chain-of-thought shifts the mix of code errors more than it
 // cuts them (Nogueira et al., arXiv 2608.00661), and costs tokens every turn.
 const RULES = `# Jean-Claude Van Code
@@ -267,6 +280,27 @@ const RULES = `# Jean-Claude Van Code
 
 const NO_ATTRIBUTION_RULE =
   '- No AI attribution: never credit Claude or any AI in commits, PRs, issues, code comments, docs or changelogs: no Co-Authored-By, no "Generated with", no signature. This overrides any attribution reminder from the harness.'
+
+// The mod's system prompt sections, composed once per thread: any change to them rewrites the whole
+// prompt cache (system, tools, conversation), so they wait for the startup checks and then hold still
+// until a /clear or a compaction, when the prefix is rewritten anyway.
+type OurSection = { id: string; text: string; scope: 'session' }
+let frozen: Promise<OurSection[]> | undefined
+let startChecks: Promise<unknown> = Promise.resolve()
+const CHECKS_WAIT_MS = 3000
+async function composeOurs($: EngineInterface): Promise<OurSection[]> {
+  await Promise.race([startChecks, $.clock.sleep(CHECKS_WAIT_MS)])
+  const out: OurSection[] = []
+  if (isOn('rules')) {
+    const text = [RULES, isOn('noAttribution') && NO_ATTRIBUTION_RULE, status.indra === 'ok' && OCR_RULE, status.jq === 'ok' && JQ_RULE, status['ast-grep'] === 'ok' && ASTGREP_RULE, status.playwright === 'ok' && PLAYWRIGHT_RULE]
+      .filter(Boolean)
+      .join('\n')
+    out.push({ id: 'van-code:rules', text, scope: 'session' })
+  }
+  const adhd = isOn('adhd') ? await adhdRules($) : undefined
+  if (adhd) out.push({ id: 'van-code:adhd', text: adhd, scope: 'session' })
+  return out
+}
 
 // The bundled i-have-adhd skill, always on: its body without the frontmatter, read once.
 let adhdText: Promise<string | undefined> | undefined
@@ -638,12 +672,14 @@ export const register: Register = (on, opts) => {
     requestsDone = 0
     sessionCost = undefined
     isGuardOn = isOn('guard')
+    frozen = undefined
+    setCache(null)
+    startChecks = checkAll($)
     if (isOn('intro')) {
       play($)
-      void checkAll($)
     } else {
       // no intro: the checklist shows only when something is missing
-      void checkAll($).then(() => {
+      void startChecks.then(() => {
         isListShown = isLacking()
         $.ui.invalidate('ui.render')
       })
@@ -653,7 +689,8 @@ export const register: Register = (on, opts) => {
     if (isOn('usageHeader')) {
       await refreshUsage($)
       usageMinute?.cancel()
-      usageMinute = $.clock.every(60_000, () => void refreshUsage($)) // countdown ticks each minute
+      // countdowns tick each minute
+      usageMinute = $.clock.every(60_000, () => void refreshUsage($).then(() => snap && warnIfCold($, snap.now)))
       animateUsage($)
     }
     return next(e)
@@ -809,6 +846,15 @@ export const register: Register = (on, opts) => {
     return ran
   }).catch(($, e, next) => next(e))
 
+  // Resuming after the cache lapsed: the first message re-caches the whole transcript.
+  on('classic.SessionStart', ($, e, next) => {
+    if ((e.source === 'resume' || e.source === 'fork') && e.prompt_cache_likely_expired && (e.context_tokens ?? 0) >= COLD_MIN_TOKENS) {
+      const usd = e.estimated_cache_write_usd ? ` (~US$ ${e.estimated_cache_write_usd.toFixed(2)})` : ''
+      $.ui.toast(`Cold cache: your first message re-caches ~${k(e.context_tokens!)} tokens${usd}. /compact first sends less.`)
+    }
+    return next(e)
+  })
+
   // No AI attribution at the source: the engine's commit trailer and PR footer come out empty.
   on('attribution.text', ($, e, next) => (isOn('noAttribution') && (e.kind === 'commit' || e.kind === 'pr') ? { text: '' } : next(e)))
 
@@ -840,6 +886,7 @@ export const register: Register = (on, opts) => {
       }
     } else r = await next({ ...e, instructions })
     if (e.agentId || r.skip !== undefined) return r
+    frozen = undefined // the prefix is rewritten anyway: a changed rule costs nothing extra now
     reads.clear()
     // precompute keeps a summary for later; the real compaction fires again
     if (isMain && e.trigger !== 'precompute') {
@@ -1079,8 +1126,14 @@ export const register: Register = (on, opts) => {
 
   // Every model request, main or subagent: where its input came from (uncached, cache read, cache write).
   on('turn.step', async function* ($, e, next) {
+    const at = e.agentId ? 0 : await $.clock.now() // a cache lifetime counts from the request's start
     const r = yield* next(e)
     if (r.usage) addTokens(r.usage)
+    if (r.usage && !e.agentId) {
+      const u = r.usage
+      setCache({ at, ttl: ttlOf(u, cache?.ttl), tokens: u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens + u.output_tokens })
+      isColdWarned = false
+    }
     return r
   })
 
@@ -1097,16 +1150,8 @@ export const register: Register = (on, opts) => {
 
   on('prompt.compose', async ($, e, next) => {
     const r = await next(e)
-    const sections = [...r.sections]
-    if (isOn('rules')) {
-      const text = [RULES, isOn('noAttribution') && NO_ATTRIBUTION_RULE, status.indra === 'ok' && OCR_RULE, status.jq === 'ok' && JQ_RULE, status['ast-grep'] === 'ok' && ASTGREP_RULE, status.playwright === 'ok' && PLAYWRIGHT_RULE]
-        .filter(Boolean)
-        .join('\n')
-      sections.push({ id: 'van-code:rules', text, scope: 'session' as const })
-    }
-    const adhd = isOn('adhd') ? await adhdRules($) : undefined
-    if (adhd) sections.push({ id: 'van-code:adhd', text: adhd, scope: 'session' as const })
-    return { ...r, sections }
+    frozen ??= composeOurs($)
+    return { ...r, sections: [...r.sections, ...(await frozen)] }
   })
 
   on('command.run', { command: 'van-code' }, $ => {
@@ -1211,6 +1256,7 @@ export const register: Register = (on, opts) => {
       const f = usageFrame
       const w = e.props.bodyColumns
       const isBusy = e.props.isWorking
+      const cacheMin = cacheLeft(cache, s.now)
       // separator: a bright comet sweeps across while working
       const head = isBusy ? (f % (w + 12)) - 12 : -99
       const sep = Array.from({ length: w }, (_, i) => {
@@ -1252,6 +1298,13 @@ export const register: Register = (on, opts) => {
               <Text key="s" color="gray">{'  │  '}</Text>
               <Text key="l" bold>ctx </Text>
               <Text key="v" color={usageColor(s.contextPercent)}>{Math.round(s.contextPercent)}%</Text>
+            </Text>
+          )}
+          {cacheMin !== undefined && (
+            <Text key="cache">
+              <Text key="s" color="gray">{'  │  '}</Text>
+              <Text key="l" bold>cache </Text>
+              <Text key="v" color={cacheMin <= 2 ? 'yellow' : 'green'}>{cacheMin === 0 ? 'cold' : `${cacheMin}m`}</Text>
             </Text>
           )}
         </Box>,

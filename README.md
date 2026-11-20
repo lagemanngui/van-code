@@ -43,7 +43,8 @@ After installing, run `/van-code-setup` once to install the recommended tools (s
 - **Loop detector.** The same shell command failing 3 times in a row tells Claude to stop retrying, read the error and change course.
 - **PDFs as text.** With `indra` installed, a Read of a PDF with no page range, or 4 pages or more, is refused once and pointed to `indra-ocr <file> --out <dir>`. Asking again goes through, for when the pages are needed as images (figures, charts, layout). A few pages (`pages: "2-3"`) pass. Read memory tracks PDFs by page.
 - **Context alarm.** A notice when context passes 60%, suggesting `/compact` or `/clear`.
-- **Usage header.** Above the prompt: the model, the rate-limit bars (5h, 7d) with the time until they reset, and the context. A comet sweeps across while Claude works.
+- **Usage header.** Above the prompt: the model, the rate-limit bars (5h, 7d) with the time until they reset, the context, and the prompt cache's minutes left (`cache 42m`, `cache cold` once it lapsed). A comet sweeps across while Claude works.
+- **Cache care.** When the cache lapses over a prompt of 20k tokens or more, a notice says how much your next message re-sends uncached, and suggests `/clear` (new topic) or `/compact` first. Resuming a session whose cache already lapsed says the same, with the estimated cost.
 
 ### Assertiveness
 
@@ -59,7 +60,7 @@ After installing, run `/van-code-setup` once to install the recommended tools (s
 - **Compaction trim.** Before a compaction, old tool output over 2,000 characters is cut to its first 600, so the summarizer reads decisions, not dumps, and costs less. The newest 12 messages and error outputs stay whole.
 - **Compaction restore.** On a compaction the summarizer is told to keep the user's constraints, the repos and services involved, and the reasons behind decisions. Right after it, your own messages from the session (verbatim, the newest 4,000 characters) and the assumption ledger ride back to Claude on the next tool result, or on your next message.
 - **Automatic Chong Li.** Changes over 30 lines, or in risky areas (data deletion, migrations, auth, money, concurrency, parsing, SQL), get a cheap review by Haiku, which sees only the diff and must name one concrete failing scenario or nothing. It looks hardest at the runtime defects compilers and retries rarely catch: indexes past either end, overflow, unbounded recursion and fragile input parsing. Findings reach Claude on your next message, flagged as possibly wrong.
-- **Van Code rules.** Short instructions added to Claude's system prompt: verify before claiming, read only what is needed, lead with the answer, test before saying done.
+- **Van Code rules.** Short instructions added to Claude's system prompt: verify before claiming, read only what is needed, lead with the answer, test before saying done. The mod's sections are composed once per conversation (after the startup checks, waiting at most 3 s) and held until a `/clear` or a compaction, so a check finishing mid-session never rewrites the prompt cache; a tool installed mid-session joins the rules after the next `/clear` or compaction.
 
 ### Flow
 
