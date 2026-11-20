@@ -30,6 +30,7 @@ After installing, run `/van-code-setup` once to install the recommended tools (s
 | `/van-code-setup [items]` | Installs the missing recommended tools; with names, also optional ones (`/van-code-setup context7`). Reloads plugins, or restarts the session, when done |
 | `/van-code-stats` | Session scoreboard: what the mod saved and what its Haiku calls cost (estimates), whether each guard is on, what the last request cost (tool calls, model requests, time, share of input from cache), the session's input split into uncached, cache read and cache write, and the average cost per request |
 | `/van-code-guard` | Turns the heavy-file guard off or on for this session |
+| `/van-code-scan [refresh \| install <n>...]` | Stack scan: finds what your dependencies' owners publish for AI agents (see [Stack scan](#stack-scan)). `install 1 3` installs those items of the list; `refresh` scans again instead of showing the saved result |
 | `/chong-li` | Adversarial review: Chong Li tries to find one concrete way the latest changes break |
 
 ## What it does on its own
@@ -61,6 +62,18 @@ After installing, run `/van-code-setup` once to install the recommended tools (s
 ### Flow
 
 - **Reply suggestions.** After each answer, if Claude Code shows no suggestion within 4 seconds, the mod proposes your likely next message (Tab takes it). It never suggests a slash command or repeats what you just sent.
+
+## Stack scan
+
+`/van-code-scan` looks for official AI resources for the frameworks and libraries you use, then for community ones where there are none. It runs only when you ask, since it uses the network.
+
+1. **Dependencies.** It reads the declared dependencies of each repo (`package.json`, `pyproject.toml`, `requirements.txt`, `go.mod`, `composer.json`, `pubspec.yaml`) and finds each one's repository: from what is installed (`node_modules`, `.venv`, `vendor`, `~/.pub-cache`), else from its registry. The owner of that repository (github.com/nestjs) is the official channel. Owners behind more runtime packages come first; dev tools count half and `@types/*` not at all.
+2. **Official.** For the top 15 owners: a plugin of Anthropic's catalog built from their repos, a Claude Code plugin marketplace or a published skills folder in their GitHub org (found with `gh`), and an `llms.txt` on their docs site. MCP repos are listed to look at, not to install.
+3. **Community.** For the owners with nothing official, the most installed matching skills on [skills.sh](https://skills.sh), marked "review before installing". Generic package names (under 5 letters) get none, since they match unrelated skills.
+
+The result is a numbered list; nothing installs until you run `/van-code-scan install <n>`. The scan is saved with a hash of each repo's manifests, so running it again with no dependency change shows the saved result at once (it rescans after 7 days, or with `refresh`). On session start the mod compares those hashes, without the network, and says `Dependências novas em <repo>: rode /van-code-scan` when one changed.
+
+Needs `gh` logged in (`gh auth status`) for the GitHub search; without it only the docs sites and the local catalog are checked. Community skills install with `npx skills add ... -y` into the folder Claude runs in.
 
 ## Factory equipment
 
@@ -107,7 +120,7 @@ Every automatic behavior has a switch in the plugin's settings (`/config`), all 
 
 ## Cost
 
-Everything runs locally and costs no tokens, except two features that call Haiku: Chong Li (only on big or risky changes) and reply suggestions (only when Claude Code shows none). Their cost counts in the session total and shows in `/van-code-stats`.
+Everything runs locally and costs no tokens, except two features that call Haiku: Chong Li (only on big or risky changes) and reply suggestions (only when Claude Code shows none). Their cost counts in the session total and shows in `/van-code-stats`. `/van-code-scan` costs no tokens: about 4 GitHub API calls and 25 web requests, a few seconds.
 
 ## Development
 

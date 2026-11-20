@@ -3,8 +3,9 @@ import type { EngineInterface, ModelUsage, PluginOptions, Register, SessionMessa
 import { affectedTests, allTests, checkFile, namedTests, reachesAny, testsText } from './checks.js'
 import { cardKind, cardNote } from './card.js'
 import { judgeInfra } from './infra.js'
+import { cacheKey, changedRoots, isStale, manifestHashes, type ScanCache, type ScanItem, stackScan } from './stack.js'
 import { isCovered, parseShellRead, type Range, readRange, resolvePath } from './reads.js'
-import { checkAll, cwd, hasWeb, infra, install, isLacking, langs, RECS, roots, run, setCwd, status } from './factory.js'
+import { checkAll, cwd, findRoots, hasWeb, infra, install, isLacking, langs, RECS, roots, run, setCwd, status } from './factory.js'
 import { type Cell, cells, LAST, MAX_W, MIN_W, pixels } from './intro.js'
 import {
   animateUsage,
@@ -525,6 +526,19 @@ async function suggestFollowUp($: EngineInterface, answer: string) {
   }
 }
 
+// Session start, no network: only when a scanned folder's manifests changed since /van-code-scan.
+async function scanNotice($: EngineInterface) {
+  try {
+    const scanned = await findRoots($)
+    const cache = (await $.store.get(cacheKey(scanned))) as ScanCache | undefined
+    if (!cache) return
+    const changed = changedRoots(cache.hashes, await manifestHashes(p => $.fs.read(p), scanned))
+    if (changed.length === 0) return
+    const names = changed.map(r => (r === scanned[0] ? '.' : r.slice(r.lastIndexOf('/') + 1)))
+    $.ui.toast(`Dependências novas em ${names.join(', ')}: rode /van-code-scan`)
+  } catch {} // a notice, never a reason for the session to fail
+}
+
 export const register: Register = (on, opts) => {
   options = opts
   on('session.start', async ($, e, next) => {
@@ -544,6 +558,10 @@ export const register: Register = (on, opts) => {
     await $.command.register({
       name: 'van-code-stats',
       description: 'Jean-Claude Van Code: what the mod saved and spent in this session',
+    })
+    await $.command.register({
+      name: 'van-code-scan',
+      description: 'Jean-Claude Van Code: find official skills, plugins and docs for AI agents for this stack (on demand, uses the network)',
     })
     await $.command.register({
       name: 'chong-li',
@@ -619,6 +637,7 @@ export const register: Register = (on, opts) => {
       })
     }
     void refreshStatus($)
+    void scanNotice($)
     if (isOn('usageHeader')) {
       await refreshUsage($)
       usageMinute?.cancel()
@@ -626,6 +645,49 @@ export const register: Register = (on, opts) => {
       animateUsage($)
     }
     return next(e)
+  })
+
+  let scanItems: ScanItem[] = [] // the last scan's numbered list, for `install <n>`
+  on('command.run', { command: 'van-code-scan' }, async ($, e) => {
+    const [sub, ...rest] = e.args.split(/\s+/).filter(Boolean)
+    if (sub !== 'install') {
+      const scanned = roots.length > 0 ? roots : [cwd]
+      const hashes = await manifestHashes(p => $.fs.read(p), scanned)
+      const cache = (await $.store.get(cacheKey(scanned))) as ScanCache | undefined
+      if (sub !== 'refresh' && cache && !isStale(cache) && changedRoots(cache.hashes, hashes).length === 0) {
+        scanItems = cache.items
+        const when = new Date(cache.at).toISOString().slice(0, 10)
+        return { text: `${cache.text}\n(saved scan from ${when}, no dependency changed since; /van-code-scan refresh asks again)`, isTextDisplayOnly: true }
+      }
+      $.ui.toast('Scanning the stack: dependencies, then GitHub and the docs sites...')
+      const scan = await stackScan($, scanned)
+      scanItems = scan.items
+      await $.store.set(cacheKey(scanned), { hashes, text: scan.text, items: scan.items, at: Date.now() } satisfies ScanCache)
+      return { text: scan.text, isTextDisplayOnly: true }
+    }
+    const picked = rest.map(n => scanItems[Number(n) - 1])
+    if (rest.length === 0 || picked.some(p => !p))
+      return { text: scanItems.length === 0 ? 'Run /van-code-scan first.' : `Pick numbers from 1 to ${scanItems.length}: /van-code-scan install 1 3`, isTextDisplayOnly: true }
+    const lines: string[] = []
+    for (const item of picked as ScanItem[]) {
+      $.ui.toast(`Instalando ${item.name}...`)
+      let ok = true
+      for (const c of item.commands) {
+        const r = await run($, c.split(' '), 300_000)
+        // a marketplace added before fails to add again; the install after it decides
+        if (!r.ok && !c.includes('marketplace add')) {
+          ok = false
+          lines.push(`${item.name}: \`${c}\` failed: ${r.out.trim().split('\n').at(-1)}`)
+          break
+        }
+      }
+      if (ok) lines.push(`${item.name}: installed`)
+    }
+    if (lines.some(l => l.endsWith(': installed'))) {
+      lines.push('Running /reload-plugins so it takes effect now...')
+      $.clock.after(500, () => void $.command.run({ command: 'reload-plugins' }).catch(() => {}))
+    }
+    return { text: lines.join('\n'), isTextDisplayOnly: true }
   })
 
   on('command.run', { command: 'van-code-stats' }, () => ({ text: statsText(), isTextDisplayOnly: true }))
@@ -997,6 +1059,7 @@ export const register: Register = (on, opts) => {
   on('session.measure', async ($, e, next) => {
     if (e.cost) sessionCost = e.cost.usd
     void refreshStatus($)
+    void scanNotice($)
     if (isOn('usageHeader')) {
       await refreshUsage($)
       animateUsage($)
