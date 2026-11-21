@@ -2,9 +2,11 @@
 
 # Jean-Claude Van Code
 
-**A Claude Code plugin that guards what Claude reads, checks every edit, and makes it prove the work before saying done.**
+**Production discipline for Claude Code: proof before "done", no silenced failures, nothing that passes on a laptop and breaks the deploy.**
 
-Claude Code is quick to read a whole lockfile, retry the same failing command, and say "all green" without running a test. Van Code sits in its hooks and catches those moments as they happen: it refuses the wasteful read, hands back the type error right after the edit, and holds "done" until a test or build actually ran. It does this with hooks, not a longer prompt, and every behavior has its own off switch.
+Claude Code writes code that passes where it was written: the test it chose to run, on the data it had. What breaks later is what nobody checked. A migration that locks a big table during the deploy, a protobuf field removed while another team's consumer still reads it, an `as any` that turned a failing check green, a dependency nobody asked for. Van Code sits in Claude Code's hooks and catches those moments as they happen. It holds "done" until a test that reaches the change ran, hands back the type error right after the edit, and flags the change that is fine locally and wrong in production. It does this mostly with deterministic checks in hooks (two cheap Haiku reviews aside), not a longer prompt, and every behavior can be turned off.
+
+It is built for engineers who review what ships to real users, not for one-prompt prototypes.
 
 **Status:** early and moving fast. 0.4.x, started in November 2026 and used daily by its author. Behavior and settings may still change between minor versions. macOS and Linux.
 
@@ -28,7 +30,7 @@ It installs the recommended tools: [`rtk`](https://github.com/rtk-ai/rtk) for le
 
 ## Why use it
 
-> **29 automatic behaviors, switched in `/config`.** The highlights are below; every one is explained in the **[full feature reference →](docs/features.md)**.
+> **31 automatic behaviors, switched in `/config`.** The highlights are below; every one is explained in the **[full feature reference →](docs/features.md)**.
 
 - **"Done" has to be earned.** If code changed and nothing ran, Claude is asked to verify and handed the exact tests that reach the change (`affected_tests` follows the imports). Tests that don't touch the edited code don't count.
 - **No cheating to get green.** After a failing check or test, an edit that silences it instead of fixing it (`as any`, `@ts-ignore`, a skipped test, `|| true`, a removed assertion) is flagged on the spot.
@@ -36,14 +38,16 @@ It installs the recommended tools: [`rtk`](https://github.com/rtk-ai/rtk) for le
 - **Reads that don't waste.** Lockfiles, build output and big logs are blocked whole; a 1,500-line file comes back first as its outline with line ranges; a file read before and changed since comes back as its diff.
 - **Kept to what you asked.** A dependency or config file your request never named is flagged where it was added, and after a big turn Haiku lists what was done unasked, or left out.
 - **Code with a history is respected.** An edit that removes lines a past fix put there gets that fix's commit (`git blame` finds it), so Claude checks the bug doesn't come back.
+- **Safe to deploy.** A migration that would lock a big table or break the running code (`DROP COLUMN`, `NOT NULL` without a default, an index without `CONCURRENTLY`) gets the expand-and-contract form instead, and a `.proto` or Avro change that breaks consumers is caught against the last commit.
 - **Safety rails for infra and git.** `terraform apply`, `kubectl`/`helm` changes and cloud deletes wait for a plan or dry run; `reset --hard` over uncommitted work and force pushes are held once.
 
-Also in the box: an adversarial Haiku review of risky diffs (Chong Li), an end-of-turn clean-room check (debug leftovers, `localhost` URLs, undocumented env vars, imports that only work on macOS), receipts that check the final answer against the tool output, compaction that keeps your constraints, and a band showing rate limits and the prompt cache countdown.
+Also in the box: an adversarial Haiku review of risky diffs (Chong Li), an end-of-turn clean-room check (debug leftovers, raw payloads or secrets in logs, `localhost` URLs, undocumented env vars, imports that only work on macOS), receipts that check the final answer against the tool output, compaction that keeps your constraints, and a band showing rate limits and the prompt cache countdown.
 
 **→ [See all features, settings and the tools `/van-code-setup` installs](docs/features.md)**
 
 ## When not to use it
 
+- **You are prototyping and want Claude unconstrained.** For a throwaway demo, the checks that protect a production codebase are friction.
 - **You want the cheapest possible session.** The mod adds about 2k tokens of instructions to each request (prompt-cached) and some Haiku calls. It buys care, not a lower bill: see [Cost](#cost).
 - **You don't want Claude Code's behavior changed.** The guards refuse reads and hold commands by design. Each one can be turned off in `/config`, but if you'd turn most of them off, a lighter setup will suit you better.
 - **Windows without WSL.** The setup relies on Homebrew or Linux installers, and that combination is untested.
