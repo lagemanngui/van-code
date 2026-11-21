@@ -6,7 +6,7 @@ import { cheatNote, findCheats } from './cheats.js'
 import { outline } from './outline.js'
 import { addedDeps, depNote, installedDeps, INTENT_SYSTEM, intentFindings, isNamed, MANIFEST } from './intent.js'
 import { findAttribution } from './attribution.js'
-import { checkReceipts, hashesIn } from './receipts.js'
+import { checkReceipts, claimedHashes, hashesIn } from './receipts.js'
 import { judgeInfra, staleFamilies } from './infra.js'
 import { judgeGit } from './git.js'
 import { type Attempt, commandKey, errorLine, loopNote, nextStreak } from './loops.js'
@@ -1100,7 +1100,8 @@ export const register: Register = (on, opts) => {
     }
     task.toolCalls += 1
     if (!e.agentId && ran.text) {
-      turnOutput = (turnOutput + '\n' + ran.text).slice(-TURN_OUTPUT_MAX)
+      // only a test or build run's own count: `12 passing` in a file being read is not a run
+      if (e.tool === 'Bash' && verifySegments(e.command).length > 0) turnOutput = (turnOutput + '\n' + ran.text).slice(-TURN_OUTPUT_MAX)
       for (const h of hashesIn(ran.text)) seenHashes.add(h)
     }
     if (e.tool === 'Bash') {
@@ -1319,6 +1320,14 @@ export const register: Register = (on, opts) => {
       )
     }
     if (!e.agentId && 'answer' in e) {
+      // the hashes seen live in memory, which a reload of the mod empties: the repository is the proof
+      if (isOn('receipts'))
+        for (const h of claimedHashes(e.answer).filter(h => ![...seenHashes].some(s => s.startsWith(h))))
+          for (const r of roots.length ? roots : [cwd])
+            if ((await run($, ['git', '-C', r, 'cat-file', '-e', `${h}^{commit}`], 10_000)).ok) {
+              seenHashes.add(h)
+              break
+            }
       const bad = isOn('receipts') ? checkReceipts(e.answer, turnOutput, seenHashes) : []
       if (bad.length > 0) {
         stats.receiptsFlagged += bad.length

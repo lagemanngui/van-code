@@ -25,9 +25,13 @@ const TASK_MIN = 300 // chars
 
 const lines = (text: string) => text.split('\n').filter(l => /^\s*([-*•]|\d+[.)]|#{1,6}\s|\[[ x]\])/.test(l)).length
 
+// A long message needs two markers: one in passing ("define expected outcome") is a document, not a card.
+const LONG = 4000 // chars
+const isKind = (text: string, markers: RegExp[]) => markers.filter(r => r.test(text)).length >= (text.length > LONG ? 2 : 1)
+
 export function cardKind(text: string): CardKind | undefined {
-  if (BUG.some(r => r.test(text))) return 'bug'
-  if (STORY.some(r => r.test(text))) return 'story'
+  if (isKind(text, BUG)) return 'bug'
+  if (isKind(text, STORY)) return 'story'
   if (text.length >= TASK_MIN && TICKET.test(text) && lines(text) >= 3) return 'task'
   return undefined
 }

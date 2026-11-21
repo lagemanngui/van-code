@@ -76,3 +76,10 @@ test('a pasted card reaches the model with its plan note; plain chat does not', 
   await $.prompt.submit({ text: BUG_PT } as never)
   expect(context.join('\n')).toContain('reads as a bug report')
 })
+
+test('a long document that mentions one marker in passing is not a card', () => {
+  const doc = `# Ideas for the plugin\n${'Some long design discussion about agents and hooks.\n'.repeat(120)}BEGIN CHANGE\n1. Snapshot\n2. Define expected outcome\n${'More ideas.\n'.repeat(50)}Acceptance criteria:\n- Failed payment can be retried.`
+  expect(cardKind(doc)).toBeUndefined()
+  // a long real bug report has more than one marker
+  expect(cardKind(`${'Log line from the service.\n'.repeat(200)}${BUG_PT}`)).toBe('bug')
+})

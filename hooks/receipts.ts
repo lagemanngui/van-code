@@ -10,6 +10,9 @@ const SEEN_HASH = /\b[0-9a-f]{7,40}\b/g
 // Hex runs seen in tool output, to check claimed commit hashes against.
 export const hashesIn = (text: string) => text.match(SEEN_HASH) ?? []
 
+// The commit hashes an answer claims, digits-only runs left out.
+export const claimedHashes = (answer: string) => [...answer.matchAll(CLAIM_HASH)].map(m => m[1]!).filter(h => !/^\d+$/.test(h))
+
 // Each claim of the answer the tool output contradicts, as one line for Claude.
 export function checkReceipts(answer: string, turnOutput: string, seenHashes: ReadonlySet<string>): string[] {
   const out: string[] = []
