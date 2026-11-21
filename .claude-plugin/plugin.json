@@ -46,6 +46,12 @@
       "description": "After a failing check or test in a turn, flags an edit that silences it instead of fixing it: as any, @ts-ignore, lint or type-check suppressions, skipped tests, || true, removed assertions.",
       "default": true
     },
+    "intentDiff": {
+      "type": "boolean",
+      "title": "Intent diff",
+      "description": "Flags a dependency the request never named, on the edit or install that added it, and after a big turn asks Haiku what the changes did that was not asked, or left out.",
+      "default": true
+    },
     "chongLi": {
       "type": "boolean",
       "title": "Automatic Chong Li",

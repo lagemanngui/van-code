@@ -4,6 +4,7 @@ import { affectedTests, allTests, checkFile, namedTests, reachesAny, testsText }
 import { cardKind, cardNote } from './card.js'
 import { cheatNote, findCheats } from './cheats.js'
 import { outline } from './outline.js'
+import { addedDeps, depNote, installedDeps, INTENT_SYSTEM, intentFindings, isNamed, MANIFEST } from './intent.js'
 import { findAttribution } from './attribution.js'
 import { checkReceipts, hashesIn } from './receipts.js'
 import { judgeInfra, staleFamilies } from './infra.js'
@@ -87,6 +88,9 @@ const stats = {
   guardOffs: 0,
   cheatsFlagged: 0,
   outlined: 0,
+  depsUnasked: 0,
+  intentRuns: 0,
+  intentFound: 0,
   outlineTokens: 0,
   insisted: { read: 0, json: 0, pdf: 0, outline: 0, infra: 0, git: 0 },
 }
@@ -157,6 +161,7 @@ function statsText() {
     `Blocks Claude insisted past (likely false blocks): ${Object.entries(stats.insisted).map(([g, n]) => `${g} ${n}`).join(' · ')}`,
     `PDFs pointed to Indra OCR: ${stats.pdfsToOcr} · ${status.indra === 'ok' ? 'indra installed' : 'indra not installed'}`,
     `Big code files shown as an outline first: ${stats.outlined} (~${k(stats.outlineTokens)} tokens) · outline first ${onOff(isOn('outlineFirst'))}`,
+    `Intent diff: ${stats.depsUnasked} unnamed dependencies flagged, ${stats.intentFound} of ${stats.intentRuns} big turns off the request · intent diff ${onOff(isOn('intentDiff'))}`,
     `Big JSON pointed to jq: ${stats.jsonToJq} · ${status.jq === 'ok' ? 'jq installed' : 'jq not installed'}`,
     `Loops caught (${LOOP_FAILS} related commands failing in a row): ${stats.loopsCaught}`,
     `Answer claims the tool output contradicted (receipts): ${stats.receiptsFlagged} · receipts ${onOff(isOn('receipts'))}`,
@@ -533,8 +538,13 @@ Otherwise answer in at most 3 short lines: the file and what breaks, then the in
 
 const lineCount = (t: string) => (t ? t.split('\n').length : 0)
 
+let turnDiff: string[] = [] // this turn's changes, for the intent diff
+// The person's last few messages: a follow-up ("do it") leans on the ones before it.
+const recentAsks = () => asks.slice(-3).join('\n\n')
+
 function recordChange(file: string, text: string, lines: number) {
   unreviewed.push({ file, text, lines })
+  turnDiff.push(text)
   turnLines += lines
   if (RISKY.test(file) || RISKY.test(text)) isTurnRisky = true
 }
@@ -563,6 +573,23 @@ async function chongLi($: EngineInterface, diff: string): Promise<string | undef
     isReviewing = false
     void refreshStatus($)
   }
+}
+
+// Intent diff, model part: the request against a big turn's changes. Undefined when they match (or it could not run).
+async function intentCheck($: EngineInterface, request: string, diff: string): Promise<string | undefined> {
+  const r = await $.model.complete({
+    model: 'haiku',
+    system: INTENT_SYSTEM,
+    prompt: `The developer's request:\n${request.slice(-4000)}\n\nThe changes:\n${diff.slice(-DIFF_MAX)}`,
+    maxTokens: 300,
+    effort: 'low',
+    timeoutMs: 60_000,
+  })
+  stats.intentRuns += 1
+  countUsage(r.usage)
+  const found = r.isAnswered ? intentFindings(r.text) : undefined
+  if (found) stats.intentFound += 1
+  return found
 }
 
 function takeUnreviewed(): string {
@@ -1062,7 +1089,8 @@ export const register: Register = (on, opts) => {
   on('tool.call', async ($, e, next) => {
     // a Write replaces the file: its old text is read first, to see what the rewrite drops or adds
     const isCheatWatch = isOn('antiCheat') && turnFailure !== '' && (e.tool === 'Edit' || e.tool === 'Write') && CODE_FILE.test(e.file_path)
-    const oldText = isCheatWatch && e.tool === 'Write' ? await $.fs.read(e.file_path).catch(() => '') : ''
+    const isDepWatch = isOn('intentDiff') && (e.tool === 'Edit' || e.tool === 'Write') && MANIFEST.test(e.file_path)
+    const oldText = (isCheatWatch || isDepWatch) && e.tool === 'Write' ? await $.fs.read(e.file_path).catch(() => '') : ''
     let ran = await next(e)
     if (ran.deny !== undefined) return ran
     // an auto-compaction mid-turn: the restore rides on the next tool result, not a turn later
@@ -1122,6 +1150,20 @@ export const register: Register = (on, opts) => {
         ran = { ...ran, context: [...(ran.context ?? []), cheatNote(e.file_path, found, turnFailure)] }
       }
     }
+    // a dependency the request never named: flagged on the result that added it
+    if (isOn('intentDiff') && !ran.isError && (isDepWatch || e.tool === 'Bash')) {
+      const added =
+        e.tool === 'Bash' ? installedDeps(e.command)
+        : e.tool === 'Edit' ? addedDeps(e.file_path, e.old_string, e.new_string)
+        : e.tool === 'Write' ? addedDeps(e.file_path, oldText, e.content)
+        : []
+      const unnamed = added.filter(d => !isNamed(d, recentAsks()))
+      if (unnamed.length > 0) {
+        stats.depsUnasked += unnamed.length
+        $.ui.toast(`Intent diff: ${unnamed.join(', ')} added, the request never named it`)
+        ran = { ...ran, context: [...(ran.context ?? []), depNote(unnamed, e.tool === 'Bash' ? 'this command' : `this edit of ${e.file_path}`)] }
+      }
+    }
     const verifies = e.tool === 'Bash' ? verifySegments(e.command) : []
     if (verifies.length > 0 && ran.isError) turnFailure ||= `a failing \`${verifies[0]}\``
     if (verifies.length > 0) {
@@ -1175,7 +1217,18 @@ export const register: Register = (on, opts) => {
         )
       })
     }
+    if (isOn('intentDiff') && !e.agentId && turnLines >= BIG_CHANGE && recentAsks()) {
+      const diff = turnDiff.join('\n\n')
+      void intentCheck($, recentAsks(), diff).then(found => {
+        if (!found) return
+        $.ui.toast(`Intent diff: ${found.split('\n')[0]}`)
+        notes.push(
+          `[Jean-Claude Van Code] Intent diff: a cheap check of your last changes against the user's request (it saw only the changes, so it may be wrong) says:\n${found}\nFor each Unasked item, remove it unless the user wants it; for each Missing one, do it or say why not. Tell the user in one line either way.`,
+        )
+      }).catch(() => {})
+    }
     if (!e.agentId) {
+      turnDiff = []
       turnFailure = ''
       turnLines = 0
       isTurnRisky = false
