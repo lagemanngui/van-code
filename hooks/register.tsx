@@ -6,7 +6,7 @@ import { cheatNote, findCheats } from './cheats.js'
 import { outline } from './outline.js'
 import { archaeologyNote, fixesRemoved, parseBlame, removedLines } from './archaeology.js'
 import { addedDeps, CONFIG, configNote, depNote, installedDeps, INTENT_SYSTEM, intentFindings, isConfigNamed, isNamed, MANIFEST } from './intent.js'
-import { caseMiss, cleanRoomNote, declaredDeps, envVars, importSpecs, isDebug, isDocumented, isLocalhost, packageOf } from './cleanroom.js'
+import { caseMiss, cleanRoomNote, declaredDeps, envVars, importSpecs, isAlias, isDebug, isDocumented, isLocalhost, packageOf } from './cleanroom.js'
 import { findAttribution } from './attribution.js'
 import { checkReceipts, claimedHashes, hashesIn } from './receipts.js'
 import { judgeInfra, staleFamilies } from './infra.js'
@@ -601,7 +601,10 @@ async function cleanRoom($: EngineInterface, added: Map<string, Set<string>>): P
     if (pkgs.length > 0) {
       const root = await findUp($, dirOf(file), 'package.json')
       const declared = root ? declaredDeps(String(await $.fs.read(`${root}/package.json`).catch(() => ''))) : undefined
-      const undeclared = declared && declared.size > 0 ? pkgs.filter(p => !declared.has(p)) : []
+      // a tsconfig/jsconfig `paths` alias (`@app/utils`) looks like a package but is the project's own code
+      const cfgDir = (await findUp($, dirOf(file), 'tsconfig.json')) ?? (await findUp($, dirOf(file), 'jsconfig.json'))
+      const cfg = cfgDir ? String(await $.fs.read(`${cfgDir}/tsconfig.json`).catch(() => $.fs.read(`${cfgDir}/jsconfig.json`)).catch(() => '')) : ''
+      const undeclared = declared && declared.size > 0 ? pkgs.filter(p => !declared.has(p) && !isAlias(p, cfg)) : []
       if (undeclared.length > 0) items.push(`${name}: imports ${undeclared.map(p => `\`${p}\``).join(', ')}, not declared in package.json (may resolve here only through another package)`)
     }
   }
@@ -755,7 +758,8 @@ async function deltaDeny($: EngineInterface, agentId: string | undefined, file: 
   const changed = r.stdout.split('\n').filter(l => /^[+-]/.test(l) && !/^(\+\+\+|---) /.test(l)).length
   if (changed > DELTA_MAX_LINES) return undefined
   // Claude now has the current text: remembered as read, and asking again goes through
-  reads.set(key, { mtimeMs: now.mtimeMs, size: now.size, ranges: [[1, Infinity]], isWarned: true, anchor: before.anchor, text })
+  // the same lines as before: a whole Read stops at 2,000 lines, so the rest stays unread
+  reads.set(key, { mtimeMs: now.mtimeMs, size: now.size, ranges: before.ranges, isWarned: true, anchor: before.anchor, text })
   stats.deltaReads += 1
   stats.deltaTokens += Math.round((text.length - r.stdout.length) / 4)
   return (

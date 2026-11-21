@@ -39,6 +39,10 @@ export function packageOf(spec: string): string | undefined {
   return name && !NODE_BUILTINS.has(name) ? name : undefined
 }
 
+// Whether a tsconfig/jsconfig text maps `pkg` as a `paths` alias: a key `"@app/*"` or `"@app"`.
+// shortcut: plain text search, so an alias only in an `extends` base config is missed; read the base too if that shows up.
+export const isAlias = (pkg: string, config: string) => config.includes(`"${pkg.split('/')[0]}/`) || config.includes(`"${pkg}"`)
+
 // Every dependency name a package.json declares.
 export function declaredDeps(packageJson: string): Set<string> {
   try {

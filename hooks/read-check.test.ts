@@ -61,3 +61,19 @@ test('a file read whole that changed since comes back as its diff once; asking a
   expect(delta.deny).toContain('+line 100 changed')
   expect((await read()).deny).toBeUndefined() // insisting goes through
 })
+
+test('after a diff re-read, lines past the first 2,000 are still unread', async ($, on) => {
+  let mtime = 1
+  const v1 = Array.from({ length: 3000 }, (_, i) => `row ${i}`).join('\n')
+  on('fs.stat', () => ({ value: { kind: 'file', size: 30_000, mtimeMs: mtime, isLink: false } }) as never)
+  on('fs.read', () => ({ value: mtime === 1 ? v1 : v1.replace('row 10', 'row 10 changed') }) as never)
+  on('session.messages', () => ({ value: [{ uuid: 'u1' }] }) as never)
+  on('process.run', (_, e) => ({ value: { exitCode: e.argv[0] === 'diff' ? 1 : 0, stdout: '--- your last read\n+++ now\n@@ -11 +11 @@\n-row 10\n+row 10 changed\n', stderr: '' } }) as never)
+  on('tool.call', () => ({ result: 'text' }))
+
+  expect((await $.tool.call({ tool: 'Read', file_path: '/p/big.txt' })).deny).toBeUndefined() // lines 1-2000
+  mtime = 2
+  expect((await $.tool.call({ tool: 'Read', file_path: '/p/big.txt' })).deny).toContain('changed since you read it whole')
+  await $.tool.call({ tool: 'Read', file_path: '/p/big.txt', offset: 1, limit: 100 }) // goes through, and re-arms the repeat guard
+  expect((await $.tool.call({ tool: 'Read', file_path: '/p/big.txt', offset: 2001, limit: 200 })).deny).toBeUndefined()
+})
