@@ -28,11 +28,12 @@ It installs the recommended tools: [`rtk`](https://github.com/rtk-ai/rtk) for le
 
 ## Why use it
 
-- **No wasted reads.** Whole reads of lockfiles, `node_modules`, build output and minified files are blocked, and Claude is pointed to Grep. A file that has not changed is not re-read. A 2 MB JSON goes to `jq`, a 12-page PDF to local OCR.
+- **No wasted reads.** Whole reads of lockfiles, `node_modules`, build output, minified files and big logs or data dumps are blocked, and Claude is pointed to Grep. A 1,500-line source file comes back first as its outline (each function with its line range), so Claude reads only the one it needs. A file that has not changed is not re-read. A 2 MB JSON goes to `jq`, a 12-page PDF to local OCR.
 - **Errors caught at the edit.** `tsc`, `ruff`, `go vet`, `bash -n`, `terraform validate` and `helm lint` run on each edited file, and their errors go straight back to Claude. A clean check costs zero tokens.
-- **"Done" has to be earned.** If code changed and nothing ran, Claude is asked to verify, and gets the exact tests that reach the change (`affected_tests` follows the imports). A UI change gets walked in a browser with Playwright.
+- **"Done" has to be earned.** If code changed and nothing ran, Claude is asked to verify, and gets the exact tests that reach the change (`affected_tests` follows the imports). A UI change gets walked in a browser with Playwright. After a failing check or test, an edit that silences it instead of fixing it (`as any`, `@ts-ignore`, a skipped test, `|| true`, a removed assertion) is flagged on the spot.
 - **A second opinion, cheaply.** Big or risky diffs (auth, money, migrations, SQL, parsing) get an adversarial review by Haiku, which must name one concrete failing case or stay quiet.
-- **Safety rails for live infra.** `terraform apply`, `kubectl`/`helm` changes and cloud deletes are held until a plan, diff or dry run has run.
+- **Kept to what you asked.** A dependency your request never named is flagged where it was added, and after a big turn Haiku lists what the changes did that you did not ask for, or left out.
+- **Safety rails for live infra.** `terraform apply`, `kubectl`/`helm` changes and cloud deletes are held until a plan, diff or dry run has run, and editing the infra afterwards makes that preview stale.
 - **Your session, visible.** A band above the prompt shows the model, the 5h/7d rate limits, context, and how many minutes the prompt cache has left. `/van-code-stats` shows what the mod saved and what it spent.
 
 Also included: receipts that check the final answer's test counts and commit hashes against the tool output, assumption and target ledgers for multi-repo work, compaction that keeps your constraints, a guard against AI attribution in commits, and the [i-have-adhd](https://github.com/ayghri/i-have-adhd) output style. The [feature reference](docs/features.md) covers each one.
@@ -62,7 +63,7 @@ Every automatic behavior has a switch in `/config`, all on by default: the [full
 Most of the mod is local code in hooks and spends no tokens. What does spend them:
 
 - Its instructions in the system prompt, about 2k tokens per request. They stay fixed for the whole conversation, so after the first request they are read from the prompt cache.
-- Haiku calls: Chong Li (only on big or risky changes) and reply suggestions (only when Claude Code shows none). Both show in `/van-code-stats`.
+- Haiku calls: Chong Li (only on big or risky changes), the intent diff (only on turns of 30 or more changed lines) and reply suggestions (only when Claude Code shows none). All show in `/van-code-stats`.
 
 The [`bench/`](bench/README.md) folder runs the same tasks with and without the mod. On its five small cases the pass rate was the same with and without it, and the median cost went from 11% cheaper to 33% more expensive. Where it should pay off is a big repo: a whole read of a 0.9 MB lockfile is about 200k tokens, a hundred times the instructions. The bench does not measure that case yet.
 

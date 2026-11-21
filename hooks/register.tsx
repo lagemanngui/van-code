@@ -4,6 +4,7 @@ import { affectedTests, allTests, checkFile, namedTests, reachesAny, testsText }
 import { cardKind, cardNote } from './card.js'
 import { cheatNote, findCheats } from './cheats.js'
 import { outline } from './outline.js'
+import { archaeologyNote, fixesRemoved, parseBlame, removedLines } from './archaeology.js'
 import { addedDeps, depNote, installedDeps, INTENT_SYSTEM, intentFindings, isNamed, MANIFEST } from './intent.js'
 import { findAttribution } from './attribution.js'
 import { checkReceipts, claimedHashes, hashesIn } from './receipts.js'
@@ -89,6 +90,7 @@ const stats = {
   cheatsFlagged: 0,
   outlined: 0,
   depsUnasked: 0,
+  archaeology: 0,
   intentRuns: 0,
   intentFound: 0,
   outlineTokens: 0,
@@ -162,6 +164,7 @@ function statsText() {
     `PDFs pointed to Indra OCR: ${stats.pdfsToOcr} · ${status.indra === 'ok' ? 'indra installed' : 'indra not installed'}`,
     `Big code files shown as an outline first: ${stats.outlined} (~${k(stats.outlineTokens)} tokens) · outline first ${onOff(isOn('outlineFirst'))}`,
     `Intent diff: ${stats.depsUnasked} unnamed dependencies flagged, ${stats.intentFound} of ${stats.intentRuns} big turns off the request · intent diff ${onOff(isOn('intentDiff'))}`,
+    `Removed lines that came from fixes, flagged: ${stats.archaeology} · archaeology ${onOff(isOn('archaeology'))}`,
     `Big JSON pointed to jq: ${stats.jsonToJq} · ${status.jq === 'ok' ? 'jq installed' : 'jq not installed'}`,
     `Loops caught (${LOOP_FAILS} related commands failing in a row): ${stats.loopsCaught}`,
     `Answer claims the tool output contradicted (receipts): ${stats.receiptsFlagged} · receipts ${onOff(isOn('receipts'))}`,
@@ -539,6 +542,21 @@ Otherwise answer in at most 3 short lines: the file and what breaks, then the in
 const lineCount = (t: string) => (t ? t.split('\n').length : 0)
 
 let turnDiff: string[] = [] // this turn's changes, for the intent diff
+
+// Archaeology: the fix commits behind the lines an edit removes, blamed before the edit lands.
+const archaeologySeen = new Set<string>() // file|hash, told once
+async function fixesBehind($: EngineInterface, file: string, oldString: string, newString: string) {
+  const removed = removedLines(oldString, newString)
+  if (removed.size === 0) return []
+  const text = await $.fs.read(file).catch(() => undefined)
+  const at = typeof text === 'string' ? text.indexOf(oldString) : -1
+  if (at === -1) return []
+  const start = text!.slice(0, at).split('\n').length
+  const end = start + oldString.split('\n').length - 1
+  const r = await run($, ['git', '-C', file.slice(0, file.lastIndexOf('/')) || '/', 'blame', '-L', `${start},${end}`, '--porcelain', '--', file], 10_000)
+  if (!r.ok) return [] // not in a repository, or the file is new
+  return fixesRemoved(parseBlame(r.out), removed).filter(f => !archaeologySeen.has(`${file}|${f.hash}`))
+}
 // The person's last few messages: a follow-up ("do it") leans on the ones before it.
 const recentAsks = () => asks.slice(-3).join('\n\n')
 
@@ -1091,8 +1109,16 @@ export const register: Register = (on, opts) => {
     const isCheatWatch = isOn('antiCheat') && turnFailure !== '' && (e.tool === 'Edit' || e.tool === 'Write') && CODE_FILE.test(e.file_path)
     const isDepWatch = isOn('intentDiff') && (e.tool === 'Edit' || e.tool === 'Write') && MANIFEST.test(e.file_path)
     const oldText = (isCheatWatch || isDepWatch) && e.tool === 'Write' ? await $.fs.read(e.file_path).catch(() => '') : ''
+    const edited = e.tool === 'Edit' ? e.file_path : ''
+    const fixes = isOn('archaeology') && e.tool === 'Edit' && CODE_FILE.test(e.file_path) ? await fixesBehind($, e.file_path, e.old_string, e.new_string).catch(() => []) : []
     let ran = await next(e)
     if (ran.deny !== undefined) return ran
+    if (fixes.length > 0 && !ran.isError) {
+      for (const f of fixes) archaeologySeen.add(`${edited}|${f.hash}`)
+      stats.archaeology += 1
+      $.ui.toast(`Archaeology: this edit removed lines from a fix (${fixes[0]!.summary.slice(0, 60)})`)
+      ran = { ...ran, context: [...(ran.context ?? []), archaeologyNote(edited, fixes)] }
+    }
     // an auto-compaction mid-turn: the restore rides on the next tool result, not a turn later
     if (restore && !e.agentId) {
       ran = { ...ran, context: [...(ran.context ?? []), restore] }

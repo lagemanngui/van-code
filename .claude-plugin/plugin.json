@@ -52,6 +52,12 @@
       "description": "Flags a dependency the request never named, on the edit or install that added it, and after a big turn asks Haiku what the changes did that was not asked, or left out.",
       "default": true
     },
+    "archaeology": {
+      "type": "boolean",
+      "title": "Archaeology",
+      "description": "When an edit removes lines that git blame traces to a commit reading as a fix (fix, race, workaround, #123), Claude is shown that commit and asked to check the bug does not come back.",
+      "default": true
+    },
     "chongLi": {
       "type": "boolean",
       "title": "Automatic Chong Li",
