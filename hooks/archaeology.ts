@@ -33,7 +33,8 @@ export function parseBlame(out: string): Blamed[] {
 export function fixesRemoved(blamed: Blamed[], removed: Set<string>): { hash: string; summary: string; lines: number[] }[] {
   const by = new Map<string, { hash: string; summary: string; lines: number[] }>()
   for (const b of blamed) {
-    if (/^0+$/.test(b.hash) || !removed.has(b.text.trim()) || !FIX.test(b.summary)) continue
+    // a merge names the PR it merged (#12), not a fix
+    if (/^0+$/.test(b.hash) || !removed.has(b.text.trim()) || !FIX.test(b.summary) || /^Merge\b/.test(b.summary)) continue
     const e = by.get(b.hash) ?? { hash: b.hash.slice(0, 7), summary: b.summary, lines: [] }
     e.lines.push(b.line)
     by.set(b.hash, e)

@@ -15,6 +15,8 @@ test('the fix commits behind the removed lines are found; renames and kept lines
   expect([...removed]).toEqual(['if (inFlight) return inFlight', 'const grace = 30_000'])
   expect([...removedLines('}\n);\ngo()', '')]).toEqual(['go()'])
   expect(fixesRemoved(parseBlame(BLAME), removed)).toEqual([{ hash: 'aaaaaaa', summary: 'Prevent refresh race in mobile clients (#482)', lines: [10, 11] }])
+  // a merge's PR number is not a fix
+  expect(fixesRemoved(parseBlame(BLAME.replace('Prevent refresh race in mobile clients (#482)', 'Merge pull request #12 from x/y')), removed)).toEqual([])
   // the rename commit owns a removed line, but it is not a fix
   expect(fixesRemoved(parseBlame(BLAME), new Set(['return refresh()']))).toEqual([])
 })
