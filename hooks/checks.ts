@@ -184,7 +184,11 @@ export async function testsText($: EngineInterface, files: string[], known?: { r
   const groups = known ?? (await affectedTests($, files))
   const roots = groups.map(g => g.root).join(', ')
   if (groups.every(g => g.tests.length === 0))
-    return `No tests import ${files.join(', ')} (searched ${IMPORT_DEPTH} import levels under ${roots}). No test to write for this: a syntax check is enough, such as ${files.map(syntaxCheck).join('; ')}.`
+    return (
+      `No test imports ${files.join(', ')} (searched ${IMPORT_DEPTH} import levels under ${roots}, by file name). ` +
+      'That misses tests that reach code without importing it: end-to-end and API tests, dependency injection, event handlers, dynamic routes. ' +
+      `If such a suite exists, run the part of it for this area (the tests in the same folder, or the last test command that passed). Otherwise a syntax check is the proof, such as ${files.map(syntaxCheck).join('; ')}.`
+    )
   const found = groups.filter(g => g.tests.length > 0)
   const lines = found.map(g => `${groups.length > 1 ? `In ${g.root}:\n` : ''}${g.tests.join('\n')}`).join('\n')
   return `Tests that reach ${files.join(', ')} (repo root ${roots}):\n${lines}\nRun only these with the project's test runner${groups.length > 1 ? ', in each repository' : ''}.`

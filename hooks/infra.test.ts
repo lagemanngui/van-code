@@ -39,3 +39,19 @@ test('a change waits for a preview, a destroy is refused once, insisting goes th
   expect((await bash('helm upgrade api ./chart')).deny).toBeUndefined() // previewed
   expect((await bash('kubectl delete ns x')).deny).toContain('deletes live infrastructure')
 })
+
+test('editing the infra after its preview makes the preview stale', async ($, on) => {
+  on('tool.call', () => ({ result: {} }))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('fs.stat', () => ({ value: { kind: 'file', size: 10, mtimeMs: 1, isLink: false } }) as never)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }) as never)
+  const bash = (command: string) => $.tool.call({ tool: 'Bash', command } as never)
+
+  await bash('terraform plan')
+  expect((await bash('terraform apply')).deny).toBeUndefined() // previewed
+  await $.tool.call({ tool: 'Edit', file_path: '/p/main.tf', old_string: 'a', new_string: 'b' } as never)
+  expect((await bash('terraform apply -auto-approve')).deny).toContain('Preview it first')
+  await $.tool.call({ tool: 'Edit', file_path: '/p/README.md', old_string: 'a', new_string: 'b' } as never)
+  await bash('terraform plan')
+  expect((await bash('terraform apply -input=false')).deny).toBeUndefined() // a doc edit leaves it fresh
+})

@@ -52,6 +52,14 @@ function judge(tokens: string[]): InfraVerdict | undefined {
   return undefined
 }
 
+// The families whose earlier preview an edit of `file` makes stale: it no longer shows what would change.
+export function staleFamilies(file: string): string[] {
+  if (/\.(tf|tfvars|hcl)$/.test(file)) return ['terraform']
+  if (/\.(ya?ml|tpl)$/.test(file)) return ['kubectl', 'helm']
+  if (/\.(ts|js|py|go|cs|java)$/.test(file)) return ['pulumi'] // Pulumi programs are code
+  return []
+}
+
 // Every infra segment of a shell command, in order; `cd x &&`, pipes and `rtk` prefixes are seen through.
 export function judgeInfra(command: string): InfraVerdict[] {
   return command

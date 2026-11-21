@@ -4,7 +4,7 @@ import { affectedTests, allTests, checkFile, namedTests, reachesAny, testsText }
 import { cardKind, cardNote } from './card.js'
 import { findAttribution } from './attribution.js'
 import { checkReceipts, hashesIn } from './receipts.js'
-import { judgeInfra } from './infra.js'
+import { judgeInfra, staleFamilies } from './infra.js'
 import { judgeGit } from './git.js'
 import { type Attempt, commandKey, errorLine, loopNote, nextStreak } from './loops.js'
 import { cacheKey, changedRoots, isStale, manifestHashes, type ScanCache, type ScanItem, stackScan } from './stack.js'
@@ -82,6 +82,8 @@ const stats = {
   stuckChecks: 0,
   uiSuggested: 0,
   cards: 0,
+  guardOffs: 0,
+  insisted: { read: 0, json: 0, pdf: 0, infra: 0, git: 0 },
 }
 
 // Infra guard: live-infra changes wait for a preview (plan, diff, dry run) of their family.
@@ -146,7 +148,8 @@ function statsText() {
   return [
     'Jean-Claude Van Code · session scoreboard (token figures are estimates)',
     `Repeat reads skipped: ${stats.readsSkipped} (~${k(stats.readTokens)} tokens) · read memory ${onOff(isOn('readMemory'))}`,
-    `Heavy files blocked: ${stats.heavyBlocked} (~${k(stats.heavyTokens)} tokens) · guard ${onOff(isGuardOn)}`,
+    `Heavy files blocked: ${stats.heavyBlocked} (~${k(stats.heavyTokens)} tokens) · guard ${onOff(isGuardOn)} · turned off ${stats.guardOffs}x`,
+    `Blocks Claude insisted past (likely false blocks): ${Object.entries(stats.insisted).map(([g, n]) => `${g} ${n}`).join(' · ')}`,
     `PDFs pointed to Indra OCR: ${stats.pdfsToOcr} · ${status.indra === 'ok' ? 'indra installed' : 'indra not installed'}`,
     `Big JSON pointed to jq: ${stats.jsonToJq} · ${status.jq === 'ok' ? 'jq installed' : 'jq not installed'}`,
     `Loops caught (${LOOP_FAILS} related commands failing in a row): ${stats.loopsCaught}`,
@@ -174,6 +177,18 @@ function statsText() {
 const HEAVY =
   /(^|\/)(node_modules|dist|\.next|coverage|vendor|\.git|__pycache__)\/|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|composer\.lock|Gemfile\.lock)$|\.min\.(js|css)$|\.map$/
 const SLICE_MAX = 300
+// Logs and data dumps: heavy only when big, a short migration or CSV fixture reads fine whole.
+const BULKY = /\.(log|csv|tsv|sql|jsonl|ndjson)$/i
+const BULKY_MIN = 100_000 // bytes, ~25k tokens
+// The file's size when reading it whole is wasteful, else undefined.
+async function heavySize($: EngineInterface, file: string): Promise<number | undefined> {
+  if (!HEAVY.test(file) && !BULKY.test(file)) return undefined
+  const size = (await $.fs.stat(file).catch(() => undefined))?.size
+  if (HEAVY.test(file)) return size ?? 0
+  return size !== undefined && size >= BULKY_MIN ? size : undefined
+}
+const HEAVY_WHAT = '(lockfile, dependency, build output, minified, or a big log or data dump)'
+const BULKY_HINT = ' For a log: `wc -l`, `tail -n`, grep the error. For CSV/SQL: the header with `head -n 5`, or query it (duckdb, sqlite3).'
 let isGuardOn = true
 
 // "Prove it works": code edited in a turn with no test/build/type-check after.
@@ -370,6 +385,13 @@ const pdfRange = (pages: string): Range => {
   return [a!, b!]
 }
 const onceWarned = new Set<string>() // PDF and JSON redirects: once per agent and file; insisting goes through
+// A refused call that went through when asked again: counted once per refusal, for /van-code-stats.
+const insistedKeys = new Set<string>()
+function insisted(guard: keyof typeof stats.insisted, key: string) {
+  if (insistedKeys.has(key)) return
+  insistedKeys.add(key)
+  stats.insisted[guard] += 1
+}
 
 // Big JSON: sliced with jq rather than read whole.
 const JSON_MAX = 32_000 // bytes
@@ -377,7 +399,7 @@ const JQ_RULE = '- JSON: slice a big JSON file with jq (`jq keys`, `jq \'.path\'
 async function jsonDeny($: EngineInterface, agentId: string | undefined, file: string) {
   if (status.jq !== 'ok' || !/\.json$/i.test(file)) return undefined
   const key = readKey(agentId, file)
-  if (onceWarned.has(key)) return undefined
+  if (onceWarned.has(key)) return void insisted('json', key)
   const st = await $.fs.stat(file).catch(() => undefined)
   if (!st || st.size <= JSON_MAX) return undefined
   onceWarned.add(key)
@@ -539,10 +561,14 @@ async function repeatDeny($: EngineInterface, agentId: string | undefined, file:
   if (!isOn('readMemory')) return undefined
   const key = readKey(agentId, file)
   const before = reads.get(key)
-  if (!before || before.isWarned || !isCovered(before.ranges, range)) return undefined
+  if (!before || !isCovered(before.ranges, range)) return undefined
   const now = await $.fs.stat(file).catch(() => undefined)
   if (!now || now.mtimeMs !== before.mtimeMs || now.size !== before.size || (await isCompactedSince($, agentId, before.anchor))) {
     reads.delete(key)
+    return undefined
+  }
+  if (before.isWarned) {
+    stats.insisted.read += 1 // remember() re-arms it, so each refusal counts once
     return undefined
   }
   before.isWarned = true
@@ -792,6 +818,7 @@ export const register: Register = (on, opts) => {
 
   on('command.run', { command: 'van-code-guard' }, () => {
     isGuardOn = !isGuardOn
+    if (!isGuardOn) stats.guardOffs += 1
     return {
       text: isGuardOn
         ? 'Guard on: heavy files only in slices.'
@@ -803,18 +830,21 @@ export const register: Register = (on, opts) => {
   // Heavy files only in slices, unless the person turned the guard off.
   on('tool.call', { tool: 'Read' }, async ($, e, next) => {
     const isSlice = e.limit !== undefined && e.limit <= SLICE_MAX
-    if (isGuardOn && !isSlice && HEAVY.test(e.file_path)) {
-      const heavy = await $.fs.stat(e.file_path).catch(() => undefined)
+    const heavySz = isGuardOn && !isSlice ? await heavySize($, e.file_path) : undefined
+    if (heavySz !== undefined) {
       stats.heavyBlocked += 1
-      stats.heavyTokens += Math.round((heavy?.size ?? 0) / 4)
+      stats.heavyTokens += Math.round(heavySz / 4)
       return {
         deny:
-          `Jean-Claude Van Code: ${e.file_path} is a heavy file (lockfile, dependency, build output or minified). ` +
-          `Use Grep to find what you need, or Read it with offset/limit (limit up to ${SLICE_MAX}). ` +
+          `Jean-Claude Van Code: ${e.file_path} is a heavy file ${HEAVY_WHAT}. ` +
+          `Use Grep to find what you need, or Read it with offset/limit (limit up to ${SLICE_MAX}).` +
+          (BULKY.test(e.file_path) ? BULKY_HINT : '') +
+          ' ' +
           'If the whole file is truly needed, ask the user to run /van-code-guard.',
       }
     }
     const pdfKey = readKey(e.agentId, e.file_path)
+    if (/\.pdf$/i.test(e.file_path) && onceWarned.has(pdfKey)) insisted('pdf', pdfKey)
     if (status.indra === 'ok' && /\.pdf$/i.test(e.file_path) && pdfPages(e.pages) >= OCR_MIN_PAGES && !onceWarned.has(pdfKey)) {
       onceWarned.add(pdfKey)
       stats.pdfsToOcr += 1
@@ -846,15 +876,25 @@ export const register: Register = (on, opts) => {
     if (!parsed) return next(e)
     const cwd = await $.session.cwd()
     const files = parsed.reads.map(r => ({ ...r, path: resolvePath(cwd, parsed.dir, r.file) }))
-    const heavy = isGuardOn ? files.find(r => (r.lines === undefined || r.lines > SLICE_MAX) && HEAVY.test(r.path)) : undefined
+    let heavy: (typeof files)[number] | undefined
+    let heavySz = 0
+    for (const r of isGuardOn ? files : []) {
+      const sz = r.lines === undefined || r.lines > SLICE_MAX ? await heavySize($, r.path) : undefined
+      if (sz !== undefined) {
+        heavy = r
+        heavySz = sz
+        break
+      }
+    }
     if (heavy) {
-      const st = await $.fs.stat(heavy.path).catch(() => undefined)
       stats.heavyBlocked += 1
-      stats.heavyTokens += Math.round((st?.size ?? 0) / 4)
+      stats.heavyTokens += Math.round(heavySz / 4)
       return {
         deny:
-          `Jean-Claude Van Code: ${heavy.file} is a heavy file (lockfile, dependency, build output or minified). ` +
-          `Use grep, or print a slice with head -n or sed -n 'A,Bp' (up to ${SLICE_MAX} lines). ` +
+          `Jean-Claude Van Code: ${heavy.file} is a heavy file ${HEAVY_WHAT}. ` +
+          `Use grep, or print a slice with head -n or sed -n 'A,Bp' (up to ${SLICE_MAX} lines).` +
+          (BULKY.test(heavy.path) ? BULKY_HINT : '') +
+          ' ' +
           'If the whole file is truly needed, ask the user to run /van-code-guard.',
       }
     }
@@ -879,6 +919,7 @@ export const register: Register = (on, opts) => {
     const found = judgeInfra(e.command)
     const held = found.find(v => (v.kind === 'change' && !previewed.has(v.family)) || v.kind === 'destroy')
     const key = `infra|${e.command.trim()}`
+    if (held && onceWarned.has(key)) insisted('infra', key)
     if (held && !onceWarned.has(key)) {
       onceWarned.add(key)
       stats.infraBlocked += 1
@@ -900,7 +941,11 @@ export const register: Register = (on, opts) => {
     if (!isOn('gitGuard')) return next(e)
     const found = judgeGit(e.command)
     const key = `git|${e.command.trim()}`
-    if (!found || onceWarned.has(key)) return next(e)
+    if (!found) return next(e)
+    if (onceWarned.has(key)) {
+      insisted('git', key)
+      return next(e)
+    }
     let dirty = ''
     if (found.kind === 'discard') {
       // shortcut: status of the session folder (or `-C`), not of a `cd x &&` target; the deny names the folder checked.
@@ -1015,6 +1060,8 @@ export const register: Register = (on, opts) => {
       turnEdited.add(e.file_path)
     }
     if ((e.tool === 'Edit' || e.tool === 'Write') && !ran.isError && touchTargets(e.file_path)) $.ui.invalidate('ui.render')
+    // a preview taken before this edit no longer shows what the change would do
+    if ((e.tool === 'Edit' || e.tool === 'Write') && !ran.isError) for (const f of staleFamilies(e.file_path)) previewed.delete(f)
     if ((e.tool === 'Edit' || e.tool === 'Write') && !ran.isError && UI_FILE.test(e.file_path)) turnUi.add(e.file_path)
     // the official playwright plugin's MCP tools count as much as playwright-cli
     if ((e.tool === 'Bash' && BROWSER.test(e.command)) || /playwright/i.test(e.tool)) ranBrowser = true
