@@ -58,6 +58,12 @@
       "description": "When an edit removes lines that git blame traces to a commit reading as a fix (fix, race, workaround, #123), Claude is shown that commit and asked to check the bug does not come back.",
       "default": true
     },
+    "cleanRoom": {
+      "type": "boolean",
+      "title": "Clean-room check",
+      "description": "At the end of a turn, flags what the new code leaves that works here and breaks elsewhere: debug leftovers, localhost URLs, env vars missing from .env.example, relative imports that match only ignoring case, packages not declared in package.json.",
+      "default": true
+    },
     "chongLi": {
       "type": "boolean",
       "title": "Automatic Chong Li",

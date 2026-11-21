@@ -78,3 +78,29 @@ export function intentFindings(text: string): string | undefined {
   const lines = text.trim().split('\n').map(l => l.trim()).filter(l => /^(Unasked|Missing):/.test(l))
   return /^NONE\b/.test(text.trim()) || lines.length === 0 ? undefined : lines.slice(0, 4).join('\n')
 }
+
+// Project config a bug fix rarely needs: an edit of one the request never names is scope creep.
+export const CONFIG = /(^|\/)(tsconfig[\w.-]*\.json|\.eslintrc[\w.-]*|eslint\.config\.[cm]?[jt]s|biome\.jsonc?|\.prettierrc[\w.-]*|prettier\.config\.[cm]?js|Dockerfile[\w.-]*|docker-compose[\w.-]*\.ya?ml|compose\.ya?ml|\.github\/workflows\/[^/]+\.ya?ml|\.gitlab-ci\.yml|schema\.prisma|(vite|vitest|jest|webpack|rollup|babel|next|nuxt|svelte|astro)\.config\.[cm]?[jt]s|babel\.config\.json|\.babelrc|setup\.cfg|tox\.ini|ruff\.toml|mypy\.ini)$/
+const CONFIG_WORDS: [RegExp, string[]][] = [
+  [/tsconfig/, ['tsconfig', 'typescript config', 'compiler option']],
+  [/eslint|biome|prettier|ruff|mypy/, ['lint', 'eslint', 'biome', 'prettier', 'format', 'ruff', 'mypy']],
+  [/docker|compose/, ['docker', 'compose', 'container', 'image']],
+  [/workflows|gitlab-ci/, ['workflow', 'pipeline', 'github action', ' ci ', ' ci.', ' ci,', 'ci/cd']],
+  [/prisma/, ['prisma', 'schema', 'migration', 'database', 'model']],
+  [/(vite|vitest|jest|webpack|rollup|babel|next|nuxt|svelte|astro)\.config|babelrc/, ['config', 'build', 'bundler', 'vite', 'vitest', 'jest', 'webpack', 'rollup', 'babel', 'next', 'nuxt']],
+  [/setup\.cfg|tox\.ini/, ['setup.cfg', 'tox', 'config']],
+]
+
+// Whether the request names the config file, or what it configures.
+export function isConfigNamed(file: string, request: string): boolean {
+  const text = ` ${request.toLowerCase()} `
+  const base = file.slice(file.lastIndexOf('/') + 1).toLowerCase()
+  const asWord = (w: string) => new RegExp(`(^|[^\\w])${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^\\w])`).test(text)
+  if (asWord(base) || asWord(base.replace(/\.[^.]+$/, ''))) return true
+  const words = CONFIG_WORDS.find(([rx]) => rx.test(file.toLowerCase()))?.[1] ?? []
+  return words.some(w => text.includes(w))
+}
+
+export const configNote = (file: string) =>
+  `[Jean-Claude Van Code] Intent diff: this edit changes project config (${file}) the request never named. ` +
+  'If the task works without it, undo it. If it is needed, tell the user why in one line.'

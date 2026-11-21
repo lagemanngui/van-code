@@ -7,7 +7,7 @@ import { cwd, run } from './factory.js'
 const CHECK_TIMEOUT = 30_000
 const CHECK_LINES = 20
 
-async function exists($: EngineInterface, path: string) {
+export async function exists($: EngineInterface, path: string) {
   try {
     await $.fs.stat(path)
     return true
@@ -17,7 +17,7 @@ async function exists($: EngineInterface, path: string) {
 }
 
 // Nearest folder at or above `dir` holding `name`, up to the filesystem root.
-async function findUp($: EngineInterface, dir: string, name: string): Promise<string | undefined> {
+export async function findUp($: EngineInterface, dir: string, name: string): Promise<string | undefined> {
   for (let d = dir; d.length > 1; d = d.slice(0, d.lastIndexOf('/')) || '/') {
     if (await exists($, `${d}/${name}`)) return d
   }

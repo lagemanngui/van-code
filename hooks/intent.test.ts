@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { addedDeps, installedDeps, intentFindings, isNamed } from './intent.js'
+import { addedDeps, CONFIG, installedDeps, intentFindings, isConfigNamed, isNamed } from './intent.js'
 
 test('dependencies added by a manifest edit or an install command', () => {
   expect(addedDeps('/p/package.json', '"dependencies": {\n  "react": "^18.0.0"', '"dependencies": {\n  "react": "^18.0.0",\n  "p-retry": "^6.2.0",\n  "@tanstack/react-query": "5.0.0"')).toEqual(['p-retry', '@tanstack/react-query'])
@@ -68,4 +68,12 @@ test('a big turn is checked against the request; the finding reaches Claude with
   await $.prompt.submit({ text: 'next' } as never)
   expect(context.join('\n')).toContain('Intent diff: a cheap check')
   expect(context.join('\n')).toContain('Unasked: a retry config option')
+})
+
+test('a config edit the request never named is scope creep; one it names is not', () => {
+  expect(['/r/tsconfig.json', '/r/.github/workflows/ci.yml', '/r/Dockerfile', '/r/vite.config.ts', '/r/src/config.ts'].map(f => CONFIG.test(f))).toEqual([true, true, true, true, false])
+  expect(isConfigNamed('/r/tsconfig.json', 'fix the login redirect')).toBe(false)
+  expect(isConfigNamed('/r/tsconfig.json', 'turn on strict in tsconfig')).toBe(true)
+  expect(isConfigNamed('/r/.github/workflows/ci.yml', 'make the CI run on node 22')).toBe(true)
+  expect(isConfigNamed('/r/.github/workflows/ci.yml', 'decide which city to show')).toBe(false)
 })

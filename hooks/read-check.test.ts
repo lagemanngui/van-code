@@ -39,3 +39,25 @@ test('a big log is heavy, a small one reads whole, and insisting past a refusal 
   const r = await $.command.run({ command: 'van-code-stats', args: '' } as never)
   expect(String(r.text)).toContain("read 1 ·")
 })
+
+test('a file read whole that changed since comes back as its diff once; asking again goes through', async ($, on) => {
+  let mtime = 1
+  const v1 = Array.from({ length: 200 }, (_, i) => `line ${i}`).join('\n')
+  const v2 = v1.replace('line 100', 'line 100 changed')
+  on('fs.stat', () => ({ value: { kind: 'file', size: 2000, mtimeMs: mtime, isLink: false } }) as never)
+  on('fs.read', () => ({ value: mtime === 1 ? v1 : v2 }) as never)
+  on('session.messages', () => ({ value: [{ uuid: 'u1' }] }) as never)
+  on('process.run', (_, e) => {
+    const isDiff = e.argv[0] === 'diff'
+    return { value: { exitCode: isDiff ? 1 : 0, stdout: isDiff ? '--- your last read\n+++ now\n@@ -101 +101 @@\n-line 100\n+line 100 changed\n' : '', stderr: '' } } as never
+  })
+  on('tool.call', () => ({ result: 'text' }))
+
+  const read = () => $.tool.call({ tool: 'Read', file_path: '/p/big.ts' })
+  expect((await read()).deny).toBeUndefined()
+  mtime = 2 // a formatter touched it
+  const delta = await read()
+  expect(delta.deny).toContain('changed since you read it whole')
+  expect(delta.deny).toContain('+line 100 changed')
+  expect((await read()).deny).toBeUndefined() // insisting goes through
+})

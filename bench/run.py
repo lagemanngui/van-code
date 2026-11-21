@@ -60,6 +60,7 @@ BLOCK_KINDS = [
     ('pdf-ocr', 'is cheaper as text'),
     ('json-jq', 'of JSON. Slice it with jq'),
     ('outline', 'Its outline'),
+    ('delta-read', 'changed since you read it whole'),
 ]
 
 

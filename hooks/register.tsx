@@ -1,18 +1,19 @@
 import type { EngineInterface, ModelUsage, PluginOptions, Register, SessionMessage, ToolResultSummary } from 'claude-code'
 
-import { affectedTests, allTests, checkFile, namedTests, reachesAny, testsText } from './checks.js'
+import { affectedTests, allTests, checkFile, dirOf, exists, findUp, IS_TEST, namedTests, reachesAny, testsText } from './checks.js'
 import { cardKind, cardNote } from './card.js'
 import { cheatNote, findCheats } from './cheats.js'
 import { outline } from './outline.js'
 import { archaeologyNote, fixesRemoved, parseBlame, removedLines } from './archaeology.js'
-import { addedDeps, depNote, installedDeps, INTENT_SYSTEM, intentFindings, isNamed, MANIFEST } from './intent.js'
+import { addedDeps, CONFIG, configNote, depNote, installedDeps, INTENT_SYSTEM, intentFindings, isConfigNamed, isNamed, MANIFEST } from './intent.js'
+import { caseMiss, cleanRoomNote, declaredDeps, envVars, importSpecs, isDebug, isDocumented, isLocalhost, packageOf } from './cleanroom.js'
 import { findAttribution } from './attribution.js'
 import { checkReceipts, claimedHashes, hashesIn } from './receipts.js'
 import { judgeInfra, staleFamilies } from './infra.js'
 import { judgeGit } from './git.js'
 import { type Attempt, commandKey, errorLine, loopNote, nextStreak } from './loops.js'
 import { cacheKey, changedRoots, isStale, manifestHashes, type ScanCache, type ScanItem, stackScan } from './stack.js'
-import { isCovered, parseShellRead, type Range, readRange, resolvePath } from './reads.js'
+import { isCovered, parseShellRead, type Range, READ_DEFAULT_LINES, readRange, resolvePath } from './reads.js'
 import { checkAll, cwd, findRoots, hasWeb, infra, install, isLacking, langs, RECS, roots, run, setCwd, status } from './factory.js'
 import { type Cell, cells, LAST, MAX_W, MIN_W, pixels } from './intro.js'
 import {
@@ -90,6 +91,10 @@ const stats = {
   cheatsFlagged: 0,
   outlined: 0,
   depsUnasked: 0,
+  configUnasked: 0,
+  cleanRoom: 0,
+  deltaReads: 0,
+  deltaTokens: 0,
   archaeology: 0,
   intentRuns: 0,
   intentFound: 0,
@@ -164,6 +169,9 @@ function statsText() {
     `PDFs pointed to Indra OCR: ${stats.pdfsToOcr} · ${status.indra === 'ok' ? 'indra installed' : 'indra not installed'}`,
     `Big code files shown as an outline first: ${stats.outlined} (~${k(stats.outlineTokens)} tokens) · outline first ${onOff(isOn('outlineFirst'))}`,
     `Intent diff: ${stats.depsUnasked} unnamed dependencies flagged, ${stats.intentFound} of ${stats.intentRuns} big turns off the request · intent diff ${onOff(isOn('intentDiff'))}`,
+    `Re-reads of a changed file answered with its diff: ${stats.deltaReads} (~${k(stats.deltaTokens)} tokens) · read memory ${onOff(isOn('readMemory'))}`,
+    `Clean-room findings (debug leftovers, localhost, undocumented env vars, import case, undeclared packages): ${stats.cleanRoom} · clean room ${onOff(isOn('cleanRoom'))}`,
+    `Config edits the request never named: ${stats.configUnasked}`,
     `Removed lines that came from fixes, flagged: ${stats.archaeology} · archaeology ${onOff(isOn('archaeology'))}`,
     `Big JSON pointed to jq: ${stats.jsonToJq} · ${status.jq === 'ok' ? 'jq installed' : 'jq not installed'}`,
     `Loops caught (${LOOP_FAILS} related commands failing in a row): ${stats.loopsCaught}`,
@@ -545,6 +553,60 @@ let turnDiff: string[] = [] // this turn's changes, for the intent diff
 
 // Archaeology: the fix commits behind the lines an edit removes, blamed before the edit lands.
 const archaeologySeen = new Set<string>() // file|hash, told once
+let configTold = new Set<string>() // config files flagged this turn
+let turnAdded = new Map<string, Set<string>>() // code lines added this turn, per file
+const ENV_EXAMPLES = ['.env.example', '.env.sample', '.env.template', '.env.dist']
+
+// Clean-room check: the lines a turn added that are still in each file, judged for what breaks elsewhere.
+async function cleanRoom($: EngineInterface, added: Map<string, Set<string>>): Promise<string[]> {
+  const items: string[] = []
+  for (const [file, lines] of added) {
+    const text = await $.fs.read(file).catch(() => undefined)
+    if (typeof text !== 'string') continue
+    const all = text.split('\n').map(l => l.trim())
+    const present = new Set(all)
+    const still = [...lines].filter(l => present.has(l))
+    if (still.length === 0) continue
+    const name = file.slice(file.lastIndexOf('/') + 1)
+    const isTest = IS_TEST.test(file)
+    // the file already logs this way elsewhere: its convention, not a leftover
+    const debugNew = still.filter(isDebug)
+    if (!isTest && debugNew.length > 0 && all.filter(isDebug).length === debugNew.length)
+      items.push(`${name}: debug leftover \`${debugNew[0]!.slice(0, 80)}\`${debugNew.length > 1 ? ` (+${debugNew.length - 1} more)` : ''}`)
+    const local = still.filter(isLocalhost)
+    if (!isTest && local.length > 0) items.push(`${name}: hardcoded local URL \`${local[0]!.slice(0, 80)}\` (works on this machine only)`)
+    const vars = envVars(still)
+    if (vars.length > 0) {
+      for (let d = dirOf(file); d.length > 1; d = dirOf(d)) {
+        const ex = (await Promise.all(ENV_EXAMPLES.map(async n => ((await exists($, `${d}/${n}`)) ? `${d}/${n}` : undefined)))).find(Boolean)
+        if (!ex) continue
+        const doc = await $.fs.read(ex).catch(() => '')
+        const missing = vars.filter(v => !isDocumented(String(doc), v))
+        if (missing.length > 0) items.push(`${name}: env ${missing.map(v => `\`${v}\``).join(', ')} not in ${ex.slice(ex.lastIndexOf('/') + 1)}`)
+        break
+      }
+    }
+    if (!/\.[cm]?[jt]sx?$|\.(vue|svelte)$/.test(file)) continue
+    const specs = importSpecs(still)
+    // a relative import that only matches ignoring case: fine on macOS, broken on a Linux CI
+    for (const spec of specs.filter(s => s.startsWith('./') || s.startsWith('../'))) {
+      const parts = `${dirOf(file)}/${spec}`.split('/')
+      const segment = parts.pop()!
+      const dir = parts.join('/').replace(/\/\.\//g, '/')
+      const entries = await $.fs.list(dir).then(es => es.map(x => x.name)).catch(() => undefined)
+      const miss = entries && caseMiss(segment, entries)
+      if (miss) items.push(`${name}: imports \`${spec}\` but the file is \`${miss}\` (breaks on a case-sensitive filesystem)`)
+    }
+    const pkgs = [...new Set(specs.map(packageOf).filter((p): p is string => !!p))]
+    if (pkgs.length > 0) {
+      const root = await findUp($, dirOf(file), 'package.json')
+      const declared = root ? declaredDeps(String(await $.fs.read(`${root}/package.json`).catch(() => ''))) : undefined
+      const undeclared = declared && declared.size > 0 ? pkgs.filter(p => !declared.has(p)) : []
+      if (undeclared.length > 0) items.push(`${name}: imports ${undeclared.map(p => `\`${p}\``).join(', ')}, not declared in package.json (may resolve here only through another package)`)
+    }
+  }
+  return items
+}
 async function fixesBehind($: EngineInterface, file: string, oldString: string, newString: string) {
   const removed = removedLines(oldString, newString)
   if (removed.size === 0) return []
@@ -618,7 +680,8 @@ function takeUnreviewed(): string {
 
 // Read memory: per agent and file, the line ranges read and the file's state then.
 // A read inside those ranges of an unchanged file is refused once; asking again goes through.
-type ReadEntry = { mtimeMs: number; size: number; ranges: Range[]; isWarned: boolean; anchor?: string }
+// text: the file as last read whole, so a re-read after a change can be answered with the diff.
+type ReadEntry = { mtimeMs: number; size: number; ranges: Range[]; isWarned: boolean; anchor?: string; text?: string }
 const reads = new Map<string, ReadEntry>()
 const readKey = (agent: string | undefined, file: string) => `${agent ?? 'main'}|${file}`
 
@@ -668,7 +731,37 @@ async function remember($: EngineInterface, agentId: string | undefined, file: s
     before.isWarned = false
     return
   }
-  reads.set(key, { mtimeMs: now.mtimeMs, size: now.size, ranges: [range], isWarned: false, anchor: await newestRow($, agentId) })
+  const isWhole = range[0] === 1 && (range[1] === Infinity || range[1] >= READ_DEFAULT_LINES)
+  const text = isWhole && now.size <= DELTA_MAX_BYTES ? await $.fs.read(file).catch(() => undefined) : undefined
+  reads.set(key, { mtimeMs: now.mtimeMs, size: now.size, ranges: [range], isWarned: false, anchor: await newestRow($, agentId), ...(typeof text === 'string' ? { text } : {}) })
+}
+
+// Delta re-read: a file read whole that changed since (a formatter, codegen, Claude's own edits) comes back as its diff.
+const DELTA_MAX_BYTES = 200_000
+const DELTA_MAX_LINES = 80 // changed lines; more and the whole file is cheaper to follow
+const DELTA_MIN_LINES = 150 // smaller files are cheap to read again
+async function deltaDeny($: EngineInterface, agentId: string | undefined, file: string) {
+  if (!isOn('readMemory')) return undefined
+  const key = readKey(agentId, file)
+  const before = reads.get(key)
+  if (!before?.text || before.isWarned) return undefined
+  const now = await $.fs.stat(file).catch(() => undefined)
+  if (!now || (now.mtimeMs === before.mtimeMs && now.size === before.size)) return undefined // unchanged: the repeat guard's case
+  if (await isCompactedSince($, agentId, before.anchor)) return undefined
+  const text = await $.fs.read(file).catch(() => undefined)
+  if (typeof text !== 'string' || text.split('\n').length < DELTA_MIN_LINES) return undefined
+  const r = await $.process.run(['diff', '-u', '--label', 'your last read', '--label', 'now', '-', file], { stdin: before.text, timeoutMs: 10_000 }).catch(() => undefined)
+  if (!r || r.exitCode !== 1) return undefined // 0: same text, 2: diff failed
+  const changed = r.stdout.split('\n').filter(l => /^[+-]/.test(l) && !/^(\+\+\+|---) /.test(l)).length
+  if (changed > DELTA_MAX_LINES) return undefined
+  // Claude now has the current text: remembered as read, and asking again goes through
+  reads.set(key, { mtimeMs: now.mtimeMs, size: now.size, ranges: [[1, Infinity]], isWarned: true, anchor: before.anchor, text })
+  stats.deltaReads += 1
+  stats.deltaTokens += Math.round((text.length - r.stdout.length) / 4)
+  return (
+    `Jean-Claude Van Code: ${file} changed since you read it whole. Only these lines differ (unified diff, your last read to now):\n${r.stdout}\n` +
+    'Apply them to what you read. If you need the whole file again (an Edit asking for a fresh read, or the first read is no longer in your context), call Read again with the same arguments and it will go through.'
+  )
 }
 
 // Test selector state; the search lives in checks.ts.
@@ -945,6 +1038,10 @@ export const register: Register = (on, opts) => {
     const range: Range = /\.pdf$/i.test(e.file_path)
       ? e.pages ? pdfRange(e.pages) : [1, Infinity]
       : readRange(e.offset, e.limit)
+    if (e.offset === undefined && e.limit === undefined) {
+      const delta = await deltaDeny($, e.agentId, e.file_path)
+      if (delta) return { deny: delta }
+    }
     const deny = await repeatDeny($, e.agentId, e.file_path, range)
     if (deny) return { deny }
     const ran = await next(e)
@@ -1108,7 +1205,8 @@ export const register: Register = (on, opts) => {
     // a Write replaces the file: its old text is read first, to see what the rewrite drops or adds
     const isCheatWatch = isOn('antiCheat') && turnFailure !== '' && (e.tool === 'Edit' || e.tool === 'Write') && CODE_FILE.test(e.file_path)
     const isDepWatch = isOn('intentDiff') && (e.tool === 'Edit' || e.tool === 'Write') && MANIFEST.test(e.file_path)
-    const oldText = (isCheatWatch || isDepWatch) && e.tool === 'Write' ? await $.fs.read(e.file_path).catch(() => '') : ''
+    const isCleanWatch = isOn('cleanRoom') && e.tool === 'Write' && CODE_FILE.test(e.file_path)
+    const oldText = (isCheatWatch || isDepWatch || isCleanWatch) && e.tool === 'Write' ? await $.fs.read(e.file_path).catch(() => '') : ''
     const edited = e.tool === 'Edit' ? e.file_path : ''
     const fixes = isOn('archaeology') && e.tool === 'Edit' && CODE_FILE.test(e.file_path) ? await fixesBehind($, e.file_path, e.old_string, e.new_string).catch(() => []) : []
     let ran = await next(e)
@@ -1191,6 +1289,20 @@ export const register: Register = (on, opts) => {
         ran = { ...ran, context: [...(ran.context ?? []), depNote(unnamed, e.tool === 'Bash' ? 'this command' : `this edit of ${e.file_path}`)] }
       }
     }
+    if (isOn('intentDiff') && !ran.isError && (e.tool === 'Edit' || e.tool === 'Write') && CONFIG.test(e.file_path) && !configTold.has(e.file_path) && !isConfigNamed(e.file_path, recentAsks())) {
+      configTold.add(e.file_path)
+      stats.configUnasked += 1
+      $.ui.toast(`Intent diff: config ${e.file_path.slice(e.file_path.lastIndexOf('/') + 1)} edited, the request never named it`)
+      ran = { ...ran, context: [...(ran.context ?? []), configNote(e.file_path)] }
+    }
+    // lines this turn added, per file: the clean-room check judges the ones still there at turn end
+    if (isOn('cleanRoom') && !ran.isError && (e.tool === 'Edit' || e.tool === 'Write') && CODE_FILE.test(e.file_path)) {
+      const [before, after] = e.tool === 'Edit' ? [e.old_string, e.new_string] : e.tool === 'Write' ? [oldText, e.content] : ['', '']
+      const had = new Set(before.split('\n').map(l => l.trim()))
+      const set = turnAdded.get(e.file_path) ?? new Set<string>()
+      for (const l of after.split('\n')) if (l.trim() && !had.has(l.trim())) set.add(l.trim())
+      turnAdded.set(e.file_path, set)
+    }
     const verifies = e.tool === 'Bash' ? verifySegments(e.command) : []
     if (verifies.length > 0 && ran.isError) turnFailure ||= `a failing \`${verifies[0]}\``
     if (verifies.length > 0) {
@@ -1254,7 +1366,18 @@ export const register: Register = (on, opts) => {
         )
       }).catch(() => {})
     }
+    if (isOn('cleanRoom') && !e.agentId && turnAdded.size > 0) {
+      const added = turnAdded
+      void cleanRoom($, added).then(items => {
+        if (items.length === 0) return
+        stats.cleanRoom += items.length
+        $.ui.toast(`Clean-room: ${items[0]}`)
+        notes.push(cleanRoomNote(items))
+      }).catch(() => {})
+    }
     if (!e.agentId) {
+      turnAdded = new Map()
+      configTold = new Set()
       turnDiff = []
       turnFailure = ''
       turnLines = 0
