@@ -1,6 +1,6 @@
 {
   "name": "van-code",
-  "version": "0.4.14",
+  "version": "0.4.15",
   "description": "Jean-Claude Van Code: production discipline for Claude Code. Proof before done, no silenced failures, nothing that passes locally and breaks the deploy",
   "keywords": ["claude-code", "hooks", "token-optimization", "prompt-caching", "code-review", "developer-tools"],
   "userConfig": {
