@@ -28,15 +28,19 @@ It installs the recommended tools: [`rtk`](https://github.com/rtk-ai/rtk) for le
 
 ## Why use it
 
-- **No wasted reads.** Whole reads of lockfiles, `node_modules`, build output, minified files and big logs or data dumps are blocked, and Claude is pointed to Grep. A 1,500-line source file comes back first as its outline (each function with its line range), so Claude reads only the one it needs. A file that has not changed is not re-read, and one that changed comes back as its diff. A 2 MB JSON goes to `jq`, a 12-page PDF to local OCR.
-- **Errors caught at the edit.** `tsc`, `ruff`, `go vet`, `bash -n`, `terraform validate` and `helm lint` run on each edited file, and their errors go straight back to Claude. A clean check costs zero tokens.
-- **"Done" has to be earned.** If code changed and nothing ran, Claude is asked to verify, and gets the exact tests that reach the change (`affected_tests` follows the imports). A UI change gets walked in a browser with Playwright. After a failing check or test, an edit that silences it instead of fixing it (`as any`, `@ts-ignore`, a skipped test, `|| true`, a removed assertion) is flagged on the spot. At turn end, debug leftovers, `localhost` URLs, undocumented env vars and imports that only work on macOS are reported, and an edit that removes lines a past fix put there is flagged (`git blame` finds the commit).
-- **A second opinion, cheaply.** Big or risky diffs (auth, money, migrations, SQL, parsing) get an adversarial review by Haiku, which must name one concrete failing case or stay quiet.
-- **Kept to what you asked.** A dependency or a config file your request never named is flagged where it was added or edited, and after a big turn Haiku lists what the changes did that you did not ask for, or left out.
-- **Safety rails for live infra.** `terraform apply`, `kubectl`/`helm` changes and cloud deletes are held until a plan, diff or dry run has run, and editing the infra afterwards makes that preview stale.
-- **Your session, visible.** A band above the prompt shows the model, the 5h/7d rate limits, context, and how many minutes the prompt cache has left. `/van-code-stats` shows what the mod saved and what it spent.
+> **29 automatic behaviors, switched in `/config`.** The highlights are below; every one is explained in the **[full feature reference →](docs/features.md)**.
 
-Also included: receipts that check the final answer's test counts and commit hashes against the tool output, assumption and target ledgers for multi-repo work, compaction that keeps your constraints, a guard against AI attribution in commits, and the [i-have-adhd](https://github.com/ayghri/i-have-adhd) output style. The [feature reference](docs/features.md) covers each one.
+- **"Done" has to be earned.** If code changed and nothing ran, Claude is asked to verify and handed the exact tests that reach the change (`affected_tests` follows the imports). Tests that don't touch the edited code don't count.
+- **No cheating to get green.** After a failing check or test, an edit that silences it instead of fixing it (`as any`, `@ts-ignore`, a skipped test, `|| true`, a removed assertion) is flagged on the spot.
+- **Errors caught at the edit.** `tsc`, `ruff`, `go vet`, `bash -n`, `terraform validate` and `helm lint` run on each edited file, and the errors go straight back to Claude. A clean check costs zero tokens.
+- **Reads that don't waste.** Lockfiles, build output and big logs are blocked whole; a 1,500-line file comes back first as its outline with line ranges; a file read before and changed since comes back as its diff.
+- **Kept to what you asked.** A dependency or config file your request never named is flagged where it was added, and after a big turn Haiku lists what was done unasked, or left out.
+- **Code with a history is respected.** An edit that removes lines a past fix put there gets that fix's commit (`git blame` finds it), so Claude checks the bug doesn't come back.
+- **Safety rails for infra and git.** `terraform apply`, `kubectl`/`helm` changes and cloud deletes wait for a plan or dry run; `reset --hard` over uncommitted work and force pushes are held once.
+
+Also in the box: an adversarial Haiku review of risky diffs (Chong Li), an end-of-turn clean-room check (debug leftovers, `localhost` URLs, undocumented env vars, imports that only work on macOS), receipts that check the final answer against the tool output, compaction that keeps your constraints, and a band showing rate limits and the prompt cache countdown.
+
+**→ [See all features, settings and the tools `/van-code-setup` installs](docs/features.md)**
 
 ## When not to use it
 
