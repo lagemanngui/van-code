@@ -1,8 +1,9 @@
 import { expect, test } from 'claude-code/testing'
 
-import { caseMiss, declaredDeps, envVars, importSpecs, isAlias, isDebug, isDocumented, packageOf } from './cleanroom.js'
+import { caseMiss, declaredDeps, envVars, importSpecs, isAlias, isDebug, isDocumented, isPiiLog, packageOf } from './cleanroom.js'
 
 test('clean-room helpers: debug lines, env vars, imports, packages, case', () => {
+  expect(['logger.info(req.body)', "log.error('bad', event.payload)", 'console.log({ password })', "logger.error('invalid token')", 'logger.info(order.id)', 'const token = req.headers.authorization'].map(isPiiLog)).toEqual([true, true, true, false, false, false])
   expect(['console.log(x)', 'debugger', 'breakpoint()', 'dbg!(v)', 'logger.info(x)'].map(isDebug)).toEqual([true, true, true, true, false])
   expect(envVars(["const k = process.env.STRIPE_KEY ?? ''", "os.getenv('DB_URL')", 'if (process.env.NODE_ENV)', 'os.Getenv("API_TOKEN")'])).toEqual(['STRIPE_KEY', 'DB_URL', 'API_TOKEN'])
   expect(isDocumented('# keys\nSTRIPE_KEY=\nexport DB_URL=postgres://', 'DB_URL')).toBe(true)

@@ -1,7 +1,7 @@
 {
   "name": "van-code",
   "version": "0.4.14",
-  "description": "Jean-Claude Van Code: guards what Claude reads, checks every edit, and makes it prove the work before saying done",
+  "description": "Jean-Claude Van Code: production discipline for Claude Code. Proof before done, no silenced failures, nothing that passes locally and breaks the deploy",
   "keywords": ["claude-code", "hooks", "token-optimization", "prompt-caching", "code-review", "developer-tools"],
   "userConfig": {
     "intro": {
@@ -62,6 +62,18 @@
       "type": "boolean",
       "title": "Clean-room check",
       "description": "At the end of a turn, flags what the new code leaves that works here and breaks elsewhere: debug leftovers, localhost URLs, env vars missing from .env.example, relative imports that match only ignoring case, packages not declared in package.json.",
+      "default": true
+    },
+    "migrationGate": {
+      "type": "boolean",
+      "title": "Migration gate",
+      "description": "Flags migration statements that lock a big table or break the code still running during a deploy (DROP/RENAME COLUMN, type changes, NOT NULL without a default, indexes without CONCURRENTLY, unvalidated constraints), in SQL, Alembic, Rails and Knex migrations.",
+      "default": true
+    },
+    "schemaGuard": {
+      "type": "boolean",
+      "title": "Schema guard",
+      "description": "Compares an edited .proto or .avsc file with its last commit and flags breaking changes: removed fields without reserved tags, type changes, reused tags, Avro fields added or removed without a default.",
       "default": true
     },
     "chongLi": {

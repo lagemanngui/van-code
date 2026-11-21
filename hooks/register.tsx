@@ -6,7 +6,9 @@ import { cheatNote, findCheats } from './cheats.js'
 import { outline } from './outline.js'
 import { archaeologyNote, fixesRemoved, parseBlame, removedLines } from './archaeology.js'
 import { addedDeps, CONFIG, configNote, depNote, installedDeps, INTENT_SYSTEM, intentFindings, isConfigNamed, isNamed, MANIFEST } from './intent.js'
-import { caseMiss, cleanRoomNote, declaredDeps, envVars, importSpecs, isAlias, isDebug, isDocumented, isLocalhost, packageOf } from './cleanroom.js'
+import { caseMiss, cleanRoomNote, declaredDeps, envVars, importSpecs, isAlias, isDebug, isDocumented, isLocalhost, isPiiLog, packageOf } from './cleanroom.js'
+import { MIGRATION, migrationNote, migrationRisks } from './migrations.js'
+import { SCHEMA_FILE, schemaBreaks, schemaNote } from './schemas.js'
 import { findAttribution } from './attribution.js'
 import { checkReceipts, claimedHashes, hashesIn } from './receipts.js'
 import { judgeInfra, staleFamilies } from './infra.js'
@@ -92,6 +94,8 @@ const stats = {
   outlined: 0,
   depsUnasked: 0,
   configUnasked: 0,
+  migrationRisks: 0,
+  schemaBreaks: 0,
   cleanRoom: 0,
   deltaReads: 0,
   deltaTokens: 0,
@@ -172,6 +176,8 @@ function statsText() {
     `Re-reads of a changed file answered with its diff: ${stats.deltaReads} (~${k(stats.deltaTokens)} tokens) · read memory ${onOff(isOn('readMemory'))}`,
     `Clean-room findings (debug leftovers, localhost, undocumented env vars, import case, undeclared packages): ${stats.cleanRoom} · clean room ${onOff(isOn('cleanRoom'))}`,
     `Config edits the request never named: ${stats.configUnasked}`,
+    `Migration statements that lock or break a live table, flagged: ${stats.migrationRisks} · migration gate ${onOff(isOn('migrationGate'))}`,
+    `Breaking schema changes (protobuf, Avro), flagged: ${stats.schemaBreaks} · schema guard ${onOff(isOn('schemaGuard'))}`,
     `Removed lines that came from fixes, flagged: ${stats.archaeology} · archaeology ${onOff(isOn('archaeology'))}`,
     `Big JSON pointed to jq: ${stats.jsonToJq} · ${status.jq === 'ok' ? 'jq installed' : 'jq not installed'}`,
     `Loops caught (${LOOP_FAILS} related commands failing in a row): ${stats.loopsCaught}`,
@@ -554,6 +560,7 @@ let turnDiff: string[] = [] // this turn's changes, for the intent diff
 // Archaeology: the fix commits behind the lines an edit removes, blamed before the edit lands.
 const archaeologySeen = new Set<string>() // file|hash, told once
 let configTold = new Set<string>() // config files flagged this turn
+const toldOnce = new Set<string>() // migration risks and schema breaks already shown, by file and text
 let turnAdded = new Map<string, Set<string>>() // code lines added this turn, per file
 const ENV_EXAMPLES = ['.env.example', '.env.sample', '.env.template', '.env.dist']
 
@@ -573,6 +580,8 @@ async function cleanRoom($: EngineInterface, added: Map<string, Set<string>>): P
     const debugNew = still.filter(isDebug)
     if (!isTest && debugNew.length > 0 && !all.some(l => isDebug(l) && !lines.has(l)))
       items.push(`${name}: debug leftover \`${debugNew[0]!.slice(0, 80)}\`${debugNew.length > 1 ? ` (+${debugNew.length - 1} more)` : ''}`)
+    const pii = still.filter(isPiiLog)
+    if (!isTest && pii.length > 0) items.push(`${name}: logs raw request data or a secret \`${pii[0]!.slice(0, 80)}\` (log the fields you need, masked)`)
     const local = still.filter(isLocalhost)
     if (!isTest && local.length > 0) items.push(`${name}: hardcoded local URL \`${local[0]!.slice(0, 80)}\` (works on this machine only)`)
     const vars = envVars(still)
@@ -1212,7 +1221,8 @@ export const register: Register = (on, opts) => {
     const isCheatWatch = isOn('antiCheat') && turnFailure !== '' && (e.tool === 'Edit' || e.tool === 'Write') && CODE_FILE.test(e.file_path)
     const isDepWatch = isOn('intentDiff') && (e.tool === 'Edit' || e.tool === 'Write') && MANIFEST.test(e.file_path)
     const isCleanWatch = isOn('cleanRoom') && e.tool === 'Write' && CODE_FILE.test(e.file_path)
-    const oldText = (isCheatWatch || isDepWatch || isCleanWatch) && e.tool === 'Write' ? await $.fs.read(e.file_path).catch(() => '') : ''
+    const isMigrationWatch = isOn('migrationGate') && (e.tool === 'Edit' || e.tool === 'Write') && MIGRATION.test(e.file_path)
+    const oldText = (isCheatWatch || isDepWatch || isCleanWatch || isMigrationWatch) && e.tool === 'Write' ? await $.fs.read(e.file_path).catch(() => '') : ''
     const edited = e.tool === 'Edit' ? e.file_path : ''
     const fixes = isOn('archaeology') && e.tool === 'Edit' && CODE_FILE.test(e.file_path) ? await fixesBehind($, e.file_path, e.old_string, e.new_string).catch(() => []) : []
     let ran = await next(e)
@@ -1300,6 +1310,32 @@ export const register: Register = (on, opts) => {
       stats.configUnasked += 1
       $.ui.toast(`Intent diff: config ${e.file_path.slice(e.file_path.lastIndexOf('/') + 1)} edited, the request never named it`)
       ran = { ...ran, context: [...(ran.context ?? []), configNote(e.file_path)] }
+    }
+    if (isMigrationWatch && !ran.isError && (e.tool === 'Edit' || e.tool === 'Write')) {
+      const [before, after] = e.tool === 'Edit' ? [e.old_string, e.new_string] : [oldText, e.content]
+      const had = new Set(before.split('\n').map(l => l.trim()))
+      const added = after.split('\n').filter(l => l.trim() && !had.has(l.trim()))
+      const whole = e.tool === 'Write' ? e.content : String(await $.fs.read(e.file_path).catch(() => after))
+      const risks = migrationRisks(added, whole).filter(r => !toldOnce.has(`${e.file_path}|${r}`))
+      if (risks.length > 0) {
+        for (const r of risks) toldOnce.add(`${e.file_path}|${r}`)
+        stats.migrationRisks += risks.length
+        $.ui.toast(`Migration gate: ${risks.length} statement(s) can lock or break a live table`)
+        ran = { ...ran, context: [...(ran.context ?? []), migrationNote(e.file_path, risks)] }
+      }
+    }
+    // a wire contract against its last commit: consumers and messages in flight still use that one
+    if (isOn('schemaGuard') && !ran.isError && (e.tool === 'Edit' || e.tool === 'Write') && SCHEMA_FILE.test(e.file_path)) {
+      const file = e.file_path
+      const committed = await run($, ['git', '-C', dirOf(file), 'show', `HEAD:./${file.slice(file.lastIndexOf('/') + 1)}`], 10_000)
+      const now = committed.ok ? await $.fs.read(file).catch(() => undefined) : undefined
+      const breaks = typeof now === 'string' ? schemaBreaks(file, committed.out, now).filter(b => !toldOnce.has(`${file}|${b}`)) : []
+      if (breaks.length > 0) {
+        for (const b of breaks) toldOnce.add(`${file}|${b}`)
+        stats.schemaBreaks += breaks.length
+        $.ui.toast(`Schema guard: ${breaks[0]}`)
+        ran = { ...ran, context: [...(ran.context ?? []), schemaNote(file, breaks)] }
+      }
     }
     // lines this turn added, per file: the clean-room check judges the ones still there at turn end
     if (isOn('cleanRoom') && !ran.isError && (e.tool === 'Edit' || e.tool === 'Write') && CODE_FILE.test(e.file_path)) {
