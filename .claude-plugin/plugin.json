@@ -34,6 +34,12 @@
       "description": "Asks Claude to verify when it edits code and runs no test or build.",
       "default": true
     },
+    "antiCheat": {
+      "type": "boolean",
+      "title": "Anti-cheat",
+      "description": "After a failing check or test in a turn, flags an edit that silences it instead of fixing it: as any, @ts-ignore, lint or type-check suppressions, skipped tests, || true, removed assertions.",
+      "default": true
+    },
     "chongLi": {
       "type": "boolean",
       "title": "Automatic Chong Li",

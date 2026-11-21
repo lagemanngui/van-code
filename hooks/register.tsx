@@ -2,6 +2,7 @@ import type { EngineInterface, ModelUsage, PluginOptions, Register, SessionMessa
 
 import { affectedTests, allTests, checkFile, namedTests, reachesAny, testsText } from './checks.js'
 import { cardKind, cardNote } from './card.js'
+import { cheatNote, findCheats } from './cheats.js'
 import { findAttribution } from './attribution.js'
 import { checkReceipts, hashesIn } from './receipts.js'
 import { judgeInfra, staleFamilies } from './infra.js'
@@ -83,6 +84,7 @@ const stats = {
   uiSuggested: 0,
   cards: 0,
   guardOffs: 0,
+  cheatsFlagged: 0,
   insisted: { read: 0, json: 0, pdf: 0, infra: 0, git: 0 },
 }
 
@@ -157,6 +159,7 @@ function statsText() {
     `Infra changes held for a preview: ${stats.infraBlocked} · infra guard ${onOff(isOn('infraGuard'))}`,
     `Git commands held over uncommitted work or a force push: ${stats.gitBlocked} · git guard ${onOff(isOn('gitGuard'))}`,
     `Test runs that missed the edited code: ${stats.proofGaps} · prove it ${onOff(isOn('proveIt'))}`,
+    `Edits that silenced a failure (type escape, skipped test, removed assertion): ${stats.cheatsFlagged} · anti-cheat ${onOff(isOn('antiCheat'))}`,
     `Cards read as a story, bug or task and planned first: ${stats.cards} · card plan ${onOff(isOn('cardPlan'))}`,
     `UI changes Claude was asked to check in a browser: ${stats.uiSuggested} · ${status.playwright === 'ok' ? 'playwright-cli installed' : status.playwright === 'none' ? 'no web frontend here' : 'playwright-cli not installed'}`,
     `Old tool output cut before compactions: ~${k(stats.trimmedTokens)} tokens the summarizer did not read · compaction trim ${onOff(isOn('compactTrim'))}`,
@@ -207,6 +210,8 @@ export function verifySegments(command: string): string[] {
 // Infra files get the post-edit check too, but are not code for "prove it".
 const INFRA_FILE = /\.(tf|tofu|ya?ml)$/
 let hasUnverifiedEdit = false
+// Anti-cheat: the failure seen this turn (a check or a test run), so a later edit that silences it is caught.
+let turnFailure = ''
 // Notes the model reads with the person's next message.
 let notes: string[] = []
 const NOTE =
@@ -304,6 +309,7 @@ async function checkEdited($: EngineInterface, file: string): Promise<string | u
     return undefined
   }
   stats.checkCatches += 1
+  turnFailure ||= `${found.tool} errors in ${file}`
   // the same errors after another edit: a structural one, which retrying rarely fixes
   const sig = errorSig(found.errors)
   const before = checkFails.get(file)
@@ -1023,6 +1029,9 @@ export const register: Register = (on, opts) => {
   })
 
   on('tool.call', async ($, e, next) => {
+    // a Write replaces the file: its old text is read first, to see what the rewrite drops or adds
+    const isCheatWatch = isOn('antiCheat') && turnFailure !== '' && (e.tool === 'Edit' || e.tool === 'Write') && CODE_FILE.test(e.file_path)
+    const oldText = isCheatWatch && e.tool === 'Write' ? await $.fs.read(e.file_path).catch(() => '') : ''
     let ran = await next(e)
     if (ran.deny !== undefined) return ran
     // an auto-compaction mid-turn: the restore rides on the next tool result, not a turn later
@@ -1073,7 +1082,17 @@ export const register: Register = (on, opts) => {
     if (e.tool === 'Write' && CODE_FILE.test(e.file_path)) {
       recordChange(e.file_path, `+++ ${e.file_path} (whole file)\n${e.content}`, lineCount(e.content))
     }
+    if (isCheatWatch && !ran.isError) {
+      const [before, after] = e.tool === 'Edit' ? [e.old_string, e.new_string] : e.tool === 'Write' ? [oldText, e.content] : ['', '']
+      const found = findCheats(e.file_path, before, after)
+      if (found.length > 0) {
+        stats.cheatsFlagged += 1
+        $.ui.toast(`Anti-cheat: ${e.file_path.slice(e.file_path.lastIndexOf('/') + 1)} got ${found[0]} after a failure`)
+        ran = { ...ran, context: [...(ran.context ?? []), cheatNote(e.file_path, found, turnFailure)] }
+      }
+    }
     const verifies = e.tool === 'Bash' ? verifySegments(e.command) : []
+    if (verifies.length > 0 && ran.isError) turnFailure ||= `a failing \`${verifies[0]}\``
     if (verifies.length > 0) {
       // a run of chosen tests proves the change only if one of them reaches it: judged at turn end
       const named = verifies.flatMap(namedTests)
@@ -1126,6 +1145,7 @@ export const register: Register = (on, opts) => {
       })
     }
     if (!e.agentId) {
+      turnFailure = ''
       turnLines = 0
       isTurnRisky = false
     }

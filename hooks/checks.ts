@@ -110,7 +110,7 @@ export async function checkFile(
 }
 
 // Test selector: which tests reach a changed file through imports, found by git grep.
-const IS_TEST = /(^|\/)(tests?|__tests__|spec)\/|\.(test|spec)\.[cm]?[jt]sx?$|(^|\/)test_[^/]+\.py$|_test\.(py|go)$/
+export const IS_TEST = /(^|\/)(tests?|__tests__|spec)\/|\.(test|spec)\.[cm]?[jt]sx?$|(^|\/)test_[^/]+\.py$|_test\.(py|go)$/
 const IMPORT_DEPTH = 4
 
 const stemOf = (file: string) => {
