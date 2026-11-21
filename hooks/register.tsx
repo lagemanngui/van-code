@@ -571,7 +571,7 @@ async function cleanRoom($: EngineInterface, added: Map<string, Set<string>>): P
     const isTest = IS_TEST.test(file)
     // the file already logs this way elsewhere: its convention, not a leftover
     const debugNew = still.filter(isDebug)
-    if (!isTest && debugNew.length > 0 && all.filter(isDebug).length === debugNew.length)
+    if (!isTest && debugNew.length > 0 && !all.some(l => isDebug(l) && !lines.has(l)))
       items.push(`${name}: debug leftover \`${debugNew[0]!.slice(0, 80)}\`${debugNew.length > 1 ? ` (+${debugNew.length - 1} more)` : ''}`)
     const local = still.filter(isLocalhost)
     if (!isTest && local.length > 0) items.push(`${name}: hardcoded local URL \`${local[0]!.slice(0, 80)}\` (works on this machine only)`)
@@ -735,7 +735,9 @@ async function remember($: EngineInterface, agentId: string | undefined, file: s
     return
   }
   const isWhole = range[0] === 1 && (range[1] === Infinity || range[1] >= READ_DEFAULT_LINES)
-  const text = isWhole && now.size <= DELTA_MAX_BYTES ? await $.fs.read(file).catch(() => undefined) : undefined
+  // only text a diff can apply to, and only when read memory is on to use it
+  const isDiffable = isOn('readMemory') && !/\.(pdf|png|jpe?g|gif|webp|ipynb)$/i.test(file)
+  const text = isWhole && isDiffable && now.size <= DELTA_MAX_BYTES ? await $.fs.read(file).catch(() => undefined) : undefined
   reads.set(key, { mtimeMs: now.mtimeMs, size: now.size, ranges: [range], isWarned: false, anchor: await newestRow($, agentId), ...(typeof text === 'string' ? { text } : {}) })
 }
 

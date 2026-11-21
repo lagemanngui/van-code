@@ -77,3 +77,28 @@ test('after a diff re-read, lines past the first 2,000 are still unread', async 
   await $.tool.call({ tool: 'Read', file_path: '/p/big.txt', offset: 1, limit: 100 }) // goes through, and re-arms the repeat guard
   expect((await $.tool.call({ tool: 'Read', file_path: '/p/big.txt', offset: 2001, limit: 200 })).deny).toBeUndefined()
 })
+
+test('a whole read keeps the text only of a file a diff can apply to', async ($, on) => {
+  const read: string[] = []
+  on('fs.stat', () => ({ value: STAT }) as never)
+  on('fs.read', (_, e) => {
+    read.push((e as { path: string }).path)
+    return { value: 'x' } as never
+  })
+  on('tool.call', () => ({ result: 'text' }))
+  await $.tool.call({ tool: 'Read', file_path: '/p/scan.png' })
+  await $.tool.call({ tool: 'Read', file_path: '/p/a.txt' })
+  expect(read).toEqual(['/p/a.txt'])
+})
+
+test('read memory off: no text kept', { options: { readMemory: false } }, async ($, on) => {
+  const read: string[] = []
+  on('fs.stat', () => ({ value: STAT }) as never)
+  on('fs.read', (_, e) => {
+    read.push((e as { path: string }).path)
+    return { value: 'x' } as never
+  })
+  on('tool.call', () => ({ result: 'text' }))
+  await $.tool.call({ tool: 'Read', file_path: '/p/a.txt' })
+  expect(read).toEqual([])
+})

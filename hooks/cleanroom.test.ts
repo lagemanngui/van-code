@@ -19,7 +19,7 @@ test('clean-room helpers: debug lines, env vars, imports, packages, case', () =>
 
 test('at turn end, what the turn added and left in is reported; what it removed again is not', async ($, on) => {
   const files: Record<string, string> = {
-    '/r/src/pay.ts': "import { Btn } from './Button'\nimport z from 'zod'\nimport { u } from '@app/utils'\nconst key = process.env.STRIPE_KEY\nconst api = 'http://localhost:3000/api'\nconsole.log(key)",
+    '/r/src/pay.ts': "import { Btn } from './Button'\nimport z from 'zod'\nimport { u } from '@app/utils'\nconst key = process.env.STRIPE_KEY\nconst api = 'http://localhost:3000/api'\nconsole.log(key)\nconsole.log(key)",
     '/r/.env.example': 'DB_URL=\n',
     '/r/package.json': '{"dependencies":{"react":"18"}}',
     '/r/tsconfig.json': '{ "compilerOptions": { "paths": { "@app/*": ["src/*"] } } }',
