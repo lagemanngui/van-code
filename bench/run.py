@@ -59,6 +59,7 @@ BLOCK_KINDS = [
     ('repeat-read', 'you already read'),
     ('pdf-ocr', 'is cheaper as text'),
     ('json-jq', 'of JSON. Slice it with jq'),
+    ('outline', 'Its outline'),
 ]
 
 

@@ -24,6 +24,7 @@ assert r['mod_blocks'] == 1 and r['blocks'][0]['tool'] == 'Read' and r['blocks']
 assert r['tool_errors'] == 1 and r['input_tokens'] == 15, r
 assert block_kind('Jean-Claude Van Code: you already read /a (these lines)') == 'repeat-read'
 assert block_kind('Jean-Claude Van Code: /a.pdf is cheaper as text') == 'pdf-ocr'
+assert block_kind('Jean-Claude Van Code: /a.ts is 900 lines. Its outline (a range') == 'outline'
 assert blocks_cell([r, r]) == '2: heavy×2' and blocks_cell([{}]) == '0'
 
 # the real stream a van-code refusal produced, when the probe is still around

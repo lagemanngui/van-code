@@ -34,6 +34,12 @@
       "description": "Asks Claude to verify when it edits code and runs no test or build.",
       "default": true
     },
+    "outlineFirst": {
+      "type": "boolean",
+      "title": "Outline first",
+      "description": "A whole Read of a code file over 400 lines is refused once with the file's outline (declarations and their line ranges), so Claude reads only the part it needs. Reading again goes through.",
+      "default": true
+    },
     "antiCheat": {
       "type": "boolean",
       "title": "Anti-cheat",

@@ -3,6 +3,7 @@ import type { EngineInterface, ModelUsage, PluginOptions, Register, SessionMessa
 import { affectedTests, allTests, checkFile, namedTests, reachesAny, testsText } from './checks.js'
 import { cardKind, cardNote } from './card.js'
 import { cheatNote, findCheats } from './cheats.js'
+import { outline } from './outline.js'
 import { findAttribution } from './attribution.js'
 import { checkReceipts, hashesIn } from './receipts.js'
 import { judgeInfra, staleFamilies } from './infra.js'
@@ -85,7 +86,9 @@ const stats = {
   cards: 0,
   guardOffs: 0,
   cheatsFlagged: 0,
-  insisted: { read: 0, json: 0, pdf: 0, infra: 0, git: 0 },
+  outlined: 0,
+  outlineTokens: 0,
+  insisted: { read: 0, json: 0, pdf: 0, outline: 0, infra: 0, git: 0 },
 }
 
 // Infra guard: live-infra changes wait for a preview (plan, diff, dry run) of their family.
@@ -153,6 +156,7 @@ function statsText() {
     `Heavy files blocked: ${stats.heavyBlocked} (~${k(stats.heavyTokens)} tokens) · guard ${onOff(isGuardOn)} · turned off ${stats.guardOffs}x`,
     `Blocks Claude insisted past (likely false blocks): ${Object.entries(stats.insisted).map(([g, n]) => `${g} ${n}`).join(' · ')}`,
     `PDFs pointed to Indra OCR: ${stats.pdfsToOcr} · ${status.indra === 'ok' ? 'indra installed' : 'indra not installed'}`,
+    `Big code files shown as an outline first: ${stats.outlined} (~${k(stats.outlineTokens)} tokens) · outline first ${onOff(isOn('outlineFirst'))}`,
     `Big JSON pointed to jq: ${stats.jsonToJq} · ${status.jq === 'ok' ? 'jq installed' : 'jq not installed'}`,
     `Loops caught (${LOOP_FAILS} related commands failing in a row): ${stats.loopsCaught}`,
     `Answer claims the tool output contradicted (receipts): ${stats.receiptsFlagged} · receipts ${onOff(isOn('receipts'))}`,
@@ -397,6 +401,29 @@ function insisted(guard: keyof typeof stats.insisted, key: string) {
   if (insistedKeys.has(key)) return
   insistedKeys.add(key)
   stats.insisted[guard] += 1
+}
+
+// Big code file: its outline first, so Claude reads only the function it needs. Once per agent and file.
+const OUTLINE_MIN_LINES = 400
+async function outlineDeny($: EngineInterface, agentId: string | undefined, file: string) {
+  if (!isOn('outlineFirst') || !CODE_FILE.test(file)) return undefined
+  const key = readKey(agentId, file)
+  if (reads.has(key)) return undefined // already read in part: it knows the file
+  if (onceWarned.has(`outline|${key}`)) return void insisted('outline', `outline|${key}`)
+  const text = await $.fs.read(file).catch(() => undefined)
+  if (typeof text !== 'string') return undefined
+  const lines = text.split('\n').length
+  if (lines < OUTLINE_MIN_LINES) return undefined
+  const entries = outline(text)
+  if (entries.length < 3) return undefined // too few declarations to steer by
+  onceWarned.add(`outline|${key}`)
+  const shown = entries.join('\n')
+  stats.outlined += 1
+  stats.outlineTokens += Math.round((text.length - shown.length) / 4)
+  return (
+    `Jean-Claude Van Code: ${file} is ${lines} lines. Its outline (a range runs to the next declaration, so it may include code between them):\n${shown}\n` +
+    'Read only what you need with offset/limit, or Grep for a name. If you truly need the whole file, call Read again with the same arguments and it will go through.'
+  )
 }
 
 // Big JSON: sliced with jq rather than read whole.
@@ -864,6 +891,10 @@ export const register: Register = (on, opts) => {
     if (e.limit === undefined || e.limit > SLICE_MAX) {
       const jq = await jsonDeny($, e.agentId, e.file_path)
       if (jq) return { deny: jq }
+    }
+    if (e.offset === undefined && e.limit === undefined) {
+      const ol = await outlineDeny($, e.agentId, e.file_path)
+      if (ol) return { deny: ol }
     }
     // a PDF is read by pages, not lines
     const range: Range = /\.pdf$/i.test(e.file_path)
