@@ -126,6 +126,7 @@ export function parseRemotePr(target: string): { slug: string; n: string } | und
 // `org/repo` of a GitHub remote URL (https or ssh), lowercased, or undefined for another host.
 export const slugOf = (url: string) => url.trim().replace(/\.git$/, '').match(/github\.com[:/]([^/]+\/[^/]+)$/)?.[1]?.toLowerCase()
 
-export const REVIEW_GO = 'Check the /van-code:review drafts: which hold up and which are false alarms.'
-export const REVIEW_ASK =
-  '[Jean-Claude Van Code] The user ran /van-code:review --claude; the review follows. For each [blocker] and [question], check it against the code: read the lines, and where a scenario is claimed, prove it with a small test in a temporary `git worktree` of that revision (remove the worktree after). Report one line per draft: holds (with the failing test or the evidence) or false alarm (why). Point to an existing helper in this repo when it already solves the problem. Post nothing to the PR.'
+// The message that starts Claude's check of the review above it; `where` is the cached clone, when the code is not here.
+export const reviewAsk = (where?: string) =>
+  'Check each [blocker] and [question] of the /van-code:review above against the code; where it claims a scenario, prove it with a small test in a temporary git worktree. One line each: holds (with the evidence) or false alarm (why). Post nothing to the PR.' +
+  (where ? ` The code is in the bare clone ${where}: \`git -C ${where} show <commit>:<path>\`, \`git -C ${where} worktree add <dir> <commit>\`.` : '')

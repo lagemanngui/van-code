@@ -1,6 +1,6 @@
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
-import { fileFindings, isImportedBy, parseRemotePr, reviewText, slugOf, swallowCount, tierOf } from './review.js'
+import { fileFindings, isImportedBy, parseRemotePr, reviewAsk, reviewText, slugOf, swallowCount, tierOf } from './review.js'
 
 const ch = (path: string, added = 1, removed = 0, isRename = false) => ({ path, added, removed, isRename })
 
@@ -91,7 +91,7 @@ test('with no target, a new file not yet added is reviewed too', async ($, on) =
   expect(text).toContain('+13 lines and no test reaches it')
 })
 
-test('--claude keeps the review on screen, hands it to Claude hidden, and starts a turn', async ($, on) => {
+test('--claude hands the review to Claude and starts a turn to check it', async ($, on) => {
   gitWorld(on)
   let scheduled = 0
   on('clock.after', () => {
@@ -99,11 +99,10 @@ test('--claude keeps the review on screen, hands it to Claude hidden, and starts
     return { value: { cancel: () => {} } } as never
   })
   const r = (await $.command.run({ command: 'van-code:review', args: '--claude' } as never)) as { text?: string; isTextDisplayOnly?: true; context?: string[] }
-  expect(r.isTextDisplayOnly).toBe(true)
-  expect(r.text).not.toContain('[Jean-Claude Van Code]')
+  expect(r.isTextDisplayOnly).toBeUndefined() // the review itself is what Claude reads
+  expect(r.context).toBeUndefined() // nothing hidden to show twice
+  expect(r.text).toContain('debug leftover')
   expect(r.text).toContain('Claude is checking the drafts now.')
-  expect(r.context?.[0]).toContain('review follows')
-  expect(r.context?.[0]).toContain('debug leftover')
   expect(scheduled).toBe(1)
 })
 
@@ -145,5 +144,30 @@ test('a PR of a repo not cloned here is reviewed from the cached clone, and Clau
   expect(r.text).toContain('[blocker] db/migrate/1_paid.rb')
   expect(seen).toContain(`${cache} gh pr view 42 --json baseRefName,baseRefOid,headRefOid,title -R acme/api`)
   expect(seen.some(c => c.startsWith('gh repo clone'))).toBe(false) // cached already: no clone
-  expect(r.context?.[0]).toContain(`it is in ${cache}`)
+  expect(reviewAsk(cache)).toContain(`git -C ${cache} show`)
+})
+
+test('--claude with no drafts starts no turn', async ($, on) => {
+  on('session.cwd', () => ({ value: '/r' }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  let scheduled = 0
+  on('clock.after', () => {
+    scheduled += 1
+    return { value: { cancel: () => {} } } as never
+  })
+  on('fs.stat', () => ({ value: { kind: 'file', size: 10, mtimeMs: 1, isLink: false } }) as never)
+  on('fs.read', () => ({ value: 'export const ok = 1\n' }) as never)
+  on('process.run', (_, e) => {
+    const a = (e as { argv: string[] }).argv.join(' ')
+    const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '' } }) as never
+    if (a.includes('--show-toplevel')) return out('/r\n')
+    if (a.includes('--verify -q main')) return out('abc\n')
+    if (a.includes('merge-base')) return out('abc123\n')
+    if (a.includes('--show-current')) return out('main\n')
+    if (a.includes('diff --numstat')) return out('1\t0\tsrc/ok.ts\0')
+    return out('', 1)
+  })
+  const r = await $.command.run({ command: 'van-code:review', args: '--claude' } as never)
+  expect(String(r.text)).toContain('Nothing for Claude to check.')
+  expect(scheduled).toBe(0)
 })

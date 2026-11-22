@@ -18,7 +18,7 @@ import { cacheKey, changedRoots, isStale, manifestHashes, type ScanCache, type S
 import { isCovered, parseShellRead, type Range, READ_DEFAULT_LINES, readRange, resolvePath } from './reads.js'
 import { checkAll, cwd, findRoots, hasWeb, infra, install, isLacking, langs, RECS, roots, run, setCwd, status } from './factory.js'
 import { type Cell, cells, LAST, MAX_W, MIN_W, pixels } from './intro.js'
-import { type Changed, type Finding, fileFindings, isImportedBy, parseRemotePr, REVIEW_ASK, REVIEW_GO, reviewText, slugOf, tierOf } from './review.js'
+import { type Changed, type Finding, fileFindings, isImportedBy, parseRemotePr, reviewAsk, reviewText, slugOf, tierOf } from './review.js'
 import { bump, findSwitch, GROUPS, type History, offHints, PROFILES, prune, titleOf, totals, turnSummary } from './switches.js'
 import {
   animateUsage,
@@ -502,7 +502,7 @@ async function cachedRepo($: EngineInterface, slug: string): Promise<{ dir: stri
   return r.exitCode === 0 ? { dir } : { error: `gh could not clone ${slug}: ${r.stderr.trim().split('\n')[0]}` }
 }
 
-async function review($: EngineInterface, args: string): Promise<{ text: string; ok: boolean; where?: string }> {
+async function review($: EngineInterface, args: string): Promise<{ text: string; ok: boolean; drafts?: number; where?: string }> {
   const target = args.split(/\s+/).filter(w => w && w !== '--claude')[0] ?? ''
   const fail = (text: string) => ({ text, ok: false })
   const top = await run($, ['git', '-C', cwd, 'rev-parse', '--show-toplevel'])
@@ -630,7 +630,7 @@ async function review($: EngineInterface, args: string): Promise<{ text: string;
       text: reach.length ? `+${s.added} lines and none of the ${reach.length} tests that reach it changed: is the new behavior tested?` : `+${s.added} lines and no test reaches it: is the new behavior tested?`,
     })
   }
-  return { text: reviewText({ title, files, findings, skipped }), ok: true, ...(where ? { where } : {}) }
+  return { text: reviewText({ title, files, findings, skipped }), ok: true, drafts: findings.length, ...(where ? { where } : {}) }
 }
 
 // The mod's system prompt sections, composed once per thread: any change to them rewrites the whole
@@ -1264,17 +1264,18 @@ export const register: Register = (on, opts) => {
   })
 
   on('command.run', { command: 'van-code:stats' }, () => ({ text: statsText(), isTextDisplayOnly: true }))
-  // Shown to the person only. With --claude the review also goes to Claude, hidden, and a turn starts to check it:
-  // a command's text alone starts no turn, it would wait for the next message.
+  // Shown to the person only. With --claude the review reaches Claude as the command's output, and a turn starts
+  // to check it (a command's output alone starts none); the ask rides in that turn's one short message.
   on('command.run', { command: 'van-code:review' }, async ($, e) => {
     $.ui.toast('Reviewing: the deterministic checks over the diff...')
     const r = await review($, e.args)
     if (!r.ok || !/(^|\s)--claude(\s|$)/.test(e.args)) return { text: r.text, isTextDisplayOnly: true }
+    const footer = 'To have Claude check the blockers: add --claude.'
+    if (!r.drafts) return { text: r.text.replace(footer, 'Nothing for Claude to check.'), isTextDisplayOnly: true }
+    const ask = reviewAsk(r.where)
     // queued after this command finishes, as the setup's reload is
-    $.clock.after(300, () => void $.prompt.submit({ text: REVIEW_GO }).catch(() => $.ui.toast('Could not start Claude on the review: send any message and it reads it')))
-    const shown = r.text.replace('To have Claude check the blockers: add --claude.', 'Claude is checking the drafts now.')
-    const at = r.where ? `\n\nThe code is not in this folder: it is in ${r.where}, a bare clone without a working tree. Read a file with \`git -C ${r.where} show <commit>:<path>\`; for a test, \`git -C ${r.where} worktree add <temp dir> <commit>\`.` : ''
-    return { text: shown, isTextDisplayOnly: true, context: [`${REVIEW_ASK}${at}\n\n${r.text}`] }
+    $.clock.after(300, () => void $.prompt.submit({ text: ask }).catch(() => $.ui.toast('Could not start Claude on the review: send any message and it reads it')))
+    return { text: r.text.replace(footer, 'Claude is checking the drafts now.') }
   })
   on('command.run', { command: 'van-code:log' }, () => ({ text: logText(), isTextDisplayOnly: true }))
 
