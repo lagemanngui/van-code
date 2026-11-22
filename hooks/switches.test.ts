@@ -165,3 +165,15 @@ test("another session's saved log stays out", async ($, on) => {
   const r = await $.command.run({ command: 'van-code:log', args: '' } as never)
   expect(String(r.text)).not.toContain('a.ts')
 })
+
+test('a bench run leaves the history and the session snapshot alone', async ($, on) => {
+  world(on)
+  const store = stored(on, '/t/a.jsonl')
+  on('env.get', (_, e) => ({ value: (e as { name: string }).name === 'VAN_CODE_BENCH' ? '1' : undefined }) as never)
+  await $.prompt.submit({ text: 'fix the tests' } as never)
+  for (let i = 0; i < 3; i++) await $.tool.call(loop(i))
+  await $.turn.complete({ answer: 'still failing' } as never)
+  for (let i = 0; i < 500; i++) await Promise.resolve()
+  expect(store.has('history')).toBe(false)
+  expect(store.has('session')).toBe(false)
+})

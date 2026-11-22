@@ -269,6 +269,8 @@ const historyNow = async ($: EngineInterface) => merge(prune(await $.store.get(H
 
 // Saved at each turn's end: the stored history re-read and added to, so two sessions at once both count.
 async function saveAll($: EngineInterface) {
+  // a bench run shares the user's store (same HOME): its counts are not the user's
+  if (await $.env.get('VAN_CODE_BENCH').catch(() => undefined)) return void (unsaved = {})
   await restoreSession($) // a turn ending right after a reload must not save over the snapshot before reading it
   const transcript = (await $.session.info().catch(() => undefined))?.transcriptPath
   if (transcript) await $.store.set(SESSION_KEY, { transcript, log: flagLog, fired, stats } satisfies SessionSnapshot).catch(() => {})
