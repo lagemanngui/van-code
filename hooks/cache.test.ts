@@ -29,3 +29,38 @@ test('resuming with a lapsed cache over a big transcript says what the first mes
   await $.classic.SessionStart({ source: 'resume', prompt_cache_likely_expired: true, context_tokens: 5_000 } as never)
   expect(toasts).toEqual([])
 })
+
+test('a push with a big context suggests a checkpoint compact, once per 100k of growth', async ($, on) => {
+  const toasts: string[] = []
+  on('ui.toast', (_, e) => {
+    toasts.push(String((e as { text?: string; message?: string }).text ?? (e as { message?: string }).message ?? e))
+    return { value: undefined } as never
+  })
+  on('session.cwd', () => ({ value: '/p' }) as never)
+  on('clock.now', () => ({ value: 0 }) as never)
+  on('tool.call', () => ({ result: {} }) as never)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }) as never)
+  let context = 0
+  on('turn.step', async function* () {
+    const usage = { input_tokens: 0, cache_read_input_tokens: context, cache_creation_input_tokens: 0, output_tokens: 0, cache_creation: { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 0 } }
+    return { turnId: 't', index: 0, answer: '', toolUses: [], stopReason: 'end_turn', usage }
+  } as never)
+  // a model request of this many tokens, as the engine reports it
+  const request = async (tokens: number) => {
+    context = tokens
+    const s = $.turn.step({ turnId: 't', index: 0, model: 'm', messageCount: 1 } as never)
+    for await (const _ of s);
+  }
+  const push = () => $.tool.call({ tool: 'Bash', command: 'rtk git push -q' } as never)
+  const tips = () => toasts.filter(t => t.startsWith('Checkpoint'))
+  await request(120_000)
+  await push()
+  expect(tips()).toHaveLength(0) // small enough
+  await request(210_000)
+  await push()
+  await push()
+  expect(tips()).toEqual([expect.stringContaining('~210.0k tokens')])
+  await request(320_000)
+  await push()
+  expect(tips()).toHaveLength(2)
+})

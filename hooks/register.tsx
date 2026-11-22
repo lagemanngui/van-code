@@ -464,6 +464,12 @@ async function checkEdited($: EngineInterface, file: string): Promise<string | u
 
 // Context alarm: warn once past 60%, re-arm under 50% (after a /compact or /clear).
 let isContextWarned = false
+// Checkpoint: cost follows the context's size, not its share of the window. After a push with a big
+// context, suggest compacting; again only once the context grew another step.
+const PUSH = /\bgit\b[^|;&]*\bpush\b/
+const CHECKPOINT_MIN = 150_000 // tokens
+const CHECKPOINT_STEP = 100_000
+let checkpointAt = 0
 
 // Cold cache: told once per lapse, when the prompt is big enough for the rewrite to matter.
 let isColdWarned = false
@@ -1192,6 +1198,7 @@ export const register: Register = (on, opts) => {
     requestsDone = 0
     costDone = 0
     overrides.clear() // /van-code on|off and profile last until /clear
+    checkpointAt = 0
     sessionProfile = undefined
     history ??= prune(await $.store.get(HISTORY_KEY).catch(() => undefined), Date.now())
     frozen = undefined
@@ -1482,6 +1489,7 @@ export const register: Register = (on, opts) => {
     if (e.agentId || r.skip !== undefined) return r
     frozen = undefined // the prefix is rewritten anyway: a changed rule costs nothing extra now
     reads.clear()
+    checkpointAt = 0 // compacted: the next big context earns its own tip
     // precompute keeps a summary for later; the real compaction fires again
     if (isMain && e.trigger !== 'precompute') {
       restore = restoreText()
@@ -1504,6 +1512,11 @@ export const register: Register = (on, opts) => {
     const fixes = isOn('archaeology') && e.tool === 'Edit' && CODE_FILE.test(e.file_path) ? await fixesBehind($, e.file_path, e.old_string, e.new_string).catch(() => []) : []
     let ran = await next(e)
     if (ran.deny !== undefined) return ran
+    // a push closes a batch of work: the cheapest moment to compact, before the next batch carries this one
+    if (e.tool === 'Bash' && !e.agentId && !ran.isError && isOn('contextAlarm') && PUSH.test(e.command) && cache && cache.tokens >= CHECKPOINT_MIN && cache.tokens - checkpointAt >= CHECKPOINT_STEP) {
+      checkpointAt = cache.tokens
+      $.ui.toast(`Checkpoint: pushed with ~${k(cache.tokens)} tokens of context. /compact now keeps the next turns cheap (/clear if the next task is new)`)
+    }
     if ((e.tool === 'Edit' || e.tool === 'Write') && !ran.isError) await markFixed($, e.file_path)
     if (fixes.length > 0 && !ran.isError) {
       for (const f of fixes) archaeologySeen.add(`${edited}|${f.hash}`)
@@ -2062,6 +2075,10 @@ export const register: Register = (on, opts) => {
               <Text key="s" color="gray">{'  │  '}</Text>
               <Text key="l" bold>cache </Text>
               <Text key="v" color={cacheMin <= 2 ? 'yellow' : 'green'}>{cacheMin === 0 ? 'cold' : `${cacheMin}m`}</Text>
+              {/* the toast fired while the person was away: the band keeps saying it until the next message */}
+              {cacheMin === 0 && cache && cache.tokens >= COLD_MIN_TOKENS && (
+                <Text key="w" color="yellow">{` · next message re-sends ~${k(cache.tokens)} · /compact first`}</Text>
+              )}
             </Text>
           )}
         </Box>,
