@@ -32,6 +32,12 @@ export function findCheats(file: string, before: string, after: string): string[
   return found
 }
 
+// The lines the edit added that carry a marker: removing them is the fix (a removed assertion has none).
+export function cheatLines(before: string, after: string): string[] {
+  const had = new Set(before.split('\n').map(l => l.trim()))
+  return after.split('\n').map(l => l.trim()).filter(l => l && !had.has(l) && MARKERS.some(([, rx]) => new RegExp(rx.source).test(l)))
+}
+
 export const cheatNote = (file: string, found: string[], failure: string) =>
   `[Jean-Claude Van Code] Anti-cheat: after ${failure} this turn, this edit of ${file} has ${found.join(', ')}. ` +
   'If it silences the failure instead of fixing it, undo it and fix the cause. If it is the right fix, tell the user why in one line.'

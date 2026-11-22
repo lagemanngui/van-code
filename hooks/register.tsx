@@ -2,7 +2,7 @@ import type { EngineInterface, ModelUsage, PluginOptions, Register, SessionMessa
 
 import { affectedTests, allTests, checkFile, dirOf, exists, findUp, IS_TEST, namedTests, reachesAny, testsText } from './checks.js'
 import { cardKind, cardNote } from './card.js'
-import { cheatNote, findCheats } from './cheats.js'
+import { cheatLines, cheatNote, findCheats } from './cheats.js'
 import { outline } from './outline.js'
 import { archaeologyNote, fixesRemoved, parseBlame, removedLines } from './archaeology.js'
 import { addedDeps, CONFIG, configNote, depNote, installedDeps, INTENT_SYSTEM, intentFindings, isConfigNamed, isNamed, MANIFEST } from './intent.js'
@@ -75,7 +75,9 @@ const offBy = (feature: string): 'session' | 'profile' | 'config' | undefined =>
 const isOn = (feature: string) => offBy(feature) === undefined
 
 // What the mod did, for /van-code:log, the turn's one toast and the 30-day history.
-type Flag = { at: number; feature: string; text: string }
+// `watch`: the lines whose removal fixes it, judged until the end of the turn after `turn`.
+type Flag = { at: number; feature: string; text: string; watch?: { file: string; lines: string[]; turn: number }; outcome?: 'fixed' | 'kept' }
+let turnNo = 0 // main turns finished
 const LOG_MAX = 20
 const flagLog: Flag[] = []
 let turnFlags: string[] = []
@@ -84,13 +86,38 @@ let history: History | undefined // loaded once from $.store
 let isHistoryDirty = false
 const HISTORY_KEY = 'history'
 // `toast`: in the turn's summary; `urgent`: the caller toasts it now; `quiet`: log and counts only (read savings).
-function flag(feature: string, text: string, how: 'toast' | 'urgent' | 'quiet' = 'toast') {
-  flagLog.push({ at: Date.now(), feature, text })
+function flag(feature: string, text: string, how: 'toast' | 'urgent' | 'quiet' = 'toast', watch?: { file: string; lines: string[]; turn?: number }) {
+  const w = watch && watch.lines.length > 0 ? { file: watch.file, lines: watch.lines.map(l => l.trim()), turn: watch.turn ?? turnNo } : undefined
+  flagLog.push({ at: Date.now(), feature, text, ...(w ? { watch: w } : {}) })
   if (flagLog.length > LOG_MAX) flagLog.shift()
   fired[feature] = (fired[feature] ?? 0) + 1
   if (history) bump(history, Date.now(), feature)
   isHistoryDirty = true
   if (how === 'toast') turnFlags.push(feature)
+}
+// An edit of a watched file: a finding whose lines are all gone was fixed.
+// shortcut: only findings still in the 20-entry log are judged; a busier turn loses the oldest.
+async function markFixed($: EngineInterface, file: string) {
+  const open = flagLog.filter(f => f.watch?.file === file && !f.outcome)
+  if (open.length === 0) return
+  const text = await $.fs.read(file).catch(() => undefined)
+  if (typeof text !== 'string') return
+  const now = new Set(text.split('\n').map(l => l.trim()))
+  for (const f of open)
+    if (!f.watch!.lines.some(l => now.has(l))) {
+      f.outcome = 'fixed'
+      if (history) bump(history, Date.now(), `${f.feature}.fixed`)
+      isHistoryDirty = true
+    }
+}
+// A turn has passed since the finding reached Claude and the lines are still there: kept (fixed another way, or explained).
+function closeKept() {
+  for (const f of flagLog)
+    if (f.watch && !f.outcome && f.watch.turn < turnNo) {
+      f.outcome = 'kept'
+      if (history) bump(history, Date.now(), `${f.feature}.kept`)
+      isHistoryDirty = true
+    }
 }
 // Claude ran the refused call again: the block was likely wrong here.
 function wentPast(feature: string, what: string) {
@@ -222,7 +249,7 @@ function switchesText(): string {
     `Jean-Claude Van Code · profile ${profileOf()} · ${GROUPS.flatMap(([, s]) => s).length - off} on, ${off} off`,
     ...GROUPS.flatMap(([g, s]) => ['', g, ...s.map(x => row(x.key, x.title))]),
     '',
-    'Change for this session: /van-code off <key> · on <key> · profile full|light|minimal',
+    'Change for this session: /van-code off <key> · on <key> · profile full|light|minimal · reset',
     'More: /van-code:log (what it did) · /van-code:stats (savings, 30 days) · /config keeps a change',
   ].join('\n')
 }
@@ -230,15 +257,19 @@ function switchesText(): string {
 function logText(): string {
   if (flagLog.length === 0) return 'Nothing yet: the mod has not stepped in this session.'
   const hhmm = (ms: number) => new Date(ms).toTimeString().slice(0, 5)
-  return [`Jean-Claude Van Code · the last ${flagLog.length} times it stepped in, newest last`, ...flagLog.map(f => `${hhmm(f.at)}  ${titleOf(f.feature).padEnd(18)} ${f.text}`)].join('\n')
+  return [`Jean-Claude Van Code · the last ${flagLog.length} times it stepped in, newest last`, ...flagLog.map(f => `${hhmm(f.at)}  ${titleOf(f.feature).padEnd(18)} ${f.text}${f.outcome ? `  → ${f.outcome}` : f.watch ? '  → open' : ''}`)].join('\n')
 }
 
+const outcomes = (t: Record<string, number>, k: string) => {
+  const parts = [t[`${k}.past`] && `went past ${t[`${k}.past`]}`, t[`${k}.fixed`] && `fixed ${t[`${k}.fixed`]}`, t[`${k}.kept`] && `kept ${t[`${k}.kept`]}`].filter(Boolean)
+  return parts.length ? ` (${parts.join(', ')})` : ''
+}
 function historyText(): string {
   const t = totals(history ?? {})
-  const top = Object.entries(t).filter(([k]) => !k.endsWith('.past')).sort((a, b) => b[1] - a[1])
+  const top = Object.entries(t).filter(([k]) => !/\.(past|fixed|kept)$/.test(k)).sort((a, b) => b[1] - a[1])
   if (top.length === 0) return 'Last 30 days: nothing recorded yet'
   return [
-    `Last 30 days (all sessions): ${top.map(([k, n]) => `${titleOf(k)} ${n}${t[`${k}.past`] ? ` (went past ${t[`${k}.past`]})` : ''}`).join(' · ')}`,
+    `Last 30 days (all sessions): ${top.map(([k, n]) => `${titleOf(k)} ${n}${outcomes(t, k)}`).join(' · ')}`,
     ...offHints(t),
   ].join('\n')
 }
@@ -650,9 +681,11 @@ let turnAdded = new Map<string, Set<string>>() // code lines added this turn, pe
 const ENV_EXAMPLES = ['.env.example', '.env.sample', '.env.template', '.env.dist']
 
 // Clean-room check: the lines a turn added that are still in each file, judged for what breaks elsewhere.
-async function cleanRoom($: EngineInterface, added: Map<string, Set<string>>): Promise<string[]> {
-  const items: string[] = []
+// Each finding with the lines whose removal fixes it (none when the fix is elsewhere: .env.example, package.json, a rename).
+async function cleanRoom($: EngineInterface, added: Map<string, Set<string>>): Promise<{ file: string; text: string; lines: string[] }[]> {
+  const found: { file: string; text: string; lines: string[] }[] = []
   for (const [file, lines] of added) {
+    const items = { push: (text: string, fixLines: string[] = []) => found.push({ file, text, lines: fixLines }) }
     const text = await $.fs.read(file).catch(() => undefined)
     if (typeof text !== 'string') continue
     const all = text.split('\n').map(l => l.trim())
@@ -664,9 +697,9 @@ async function cleanRoom($: EngineInterface, added: Map<string, Set<string>>): P
     // the file already logs this way elsewhere: its convention, not a leftover
     const debugNew = still.filter(isDebug)
     if (!isTest && debugNew.length > 0 && !all.some(l => isDebug(l) && !lines.has(l)))
-      items.push(`${name}: debug leftover \`${debugNew[0]!.slice(0, 80)}\`${debugNew.length > 1 ? ` (+${debugNew.length - 1} more)` : ''}`)
+      items.push(`${name}: debug leftover \`${debugNew[0]!.slice(0, 80)}\`${debugNew.length > 1 ? ` (+${debugNew.length - 1} more)` : ''}`, debugNew)
     const pii = still.filter(isPiiLog)
-    if (!isTest && pii.length > 0) items.push(`${name}: logs raw request data or a secret \`${pii[0]!.slice(0, 80)}\` (log the fields you need, masked)`)
+    if (!isTest && pii.length > 0) items.push(`${name}: logs raw request data or a secret \`${pii[0]!.slice(0, 80)}\` (log the fields you need, masked)`, pii)
     // scale traps: one round trip per item, or every item at once
     if (!isTest && /\.([cm]?[jt]sx?|py)$/.test(file)) {
       const raw = text.split('\n')
@@ -674,13 +707,13 @@ async function cleanRoom($: EngineInterface, added: Map<string, Set<string>>): P
         const i = raw.findIndex(r => r.trim() === l)
         const loop = i === -1 ? undefined : loopAround(raw, i)
         if (loop !== undefined)
-          items.push(`${name}: \`${l.slice(0, 70)}\` runs once per item of the loop at L${loop + 1}: 10,000 items is 10,000 round trips (one query for all of them, or a cache)`)
+          items.push(`${name}: \`${l.slice(0, 70)}\` runs once per item of the loop at L${loop + 1}: 10,000 items is 10,000 round trips (one query for all of them, or a cache)`, [l])
       }
       const burst = still.filter(isUnbounded)
-      if (burst.length > 0) items.push(`${name}: \`${burst[0]!.slice(0, 70)}\` starts every item at once: 20,000 items is 20,000 calls in flight (bound it: a small worker pool, or chunks)`)
+      if (burst.length > 0) items.push(`${name}: \`${burst[0]!.slice(0, 70)}\` starts every item at once: 20,000 items is 20,000 calls in flight (bound it: a small worker pool, or chunks)`, burst)
     }
     const local = still.filter(isLocalhost)
-    if (!isTest && local.length > 0) items.push(`${name}: hardcoded local URL \`${local[0]!.slice(0, 80)}\` (works on this machine only)`)
+    if (!isTest && local.length > 0) items.push(`${name}: hardcoded local URL \`${local[0]!.slice(0, 80)}\` (works on this machine only)`, local)
     const vars = envVars(still)
     if (vars.length > 0) {
       for (let d = dirOf(file); d.length > 1; d = dirOf(d)) {
@@ -714,7 +747,7 @@ async function cleanRoom($: EngineInterface, added: Map<string, Set<string>>): P
       if (undeclared.length > 0) items.push(`${name}: imports ${undeclared.map(p => `\`${p}\``).join(', ')}, not declared in package.json (may resolve here only through another package)`)
     }
   }
-  return items
+  return found
 }
 async function fixesBehind($: EngineInterface, file: string, oldString: string, newString: string) {
   const removed = removedLines(oldString, newString)
@@ -940,7 +973,7 @@ async function scanNotice($: EngineInterface) {
     const changed = changedRoots(cache.hashes, await manifestHashes(p => $.fs.read(p), scanned))
     if (changed.length === 0) return
     const names = changed.map(r => (r === scanned[0] ? '.' : r.slice(r.lastIndexOf('/') + 1)))
-    $.ui.toast(`Dependências novas em ${names.join(', ')}: rode /van-code:scan`)
+    $.ui.toast(`New dependencies in ${names.join(', ')}: run /van-code:scan`)
   } catch {} // a notice, never a reason for the session to fail
 }
 
@@ -950,7 +983,7 @@ export const register: Register = (on, opts) => {
     setCwd(e.cwd)
     await $.command.register({
       name: 'van-code',
-      description: 'Jean-Claude Van Code: switches by group; on|off <feature>, profile <full|light|minimal>, intro',
+      description: 'Jean-Claude Van Code: switches by group; on|off <feature>, profile <full|light|minimal>, reset, intro',
     })
     await $.tool.register({
       name: 'affected_tests',
@@ -1062,7 +1095,7 @@ export const register: Register = (on, opts) => {
       return { text: scanItems.length === 0 ? 'Run /van-code:scan first.' : `Pick numbers from 1 to ${scanItems.length}: /van-code:scan install 1 3`, isTextDisplayOnly: true }
     const lines: string[] = []
     for (const item of picked as ScanItem[]) {
-      $.ui.toast(`Instalando ${item.name}...`)
+      $.ui.toast(`Installing ${item.name}...`)
       let ok = true
       for (const c of item.commands) {
         const r = await run($, c.split(' '), 300_000)
@@ -1310,6 +1343,7 @@ export const register: Register = (on, opts) => {
     const fixes = isOn('archaeology') && e.tool === 'Edit' && CODE_FILE.test(e.file_path) ? await fixesBehind($, e.file_path, e.old_string, e.new_string).catch(() => []) : []
     let ran = await next(e)
     if (ran.deny !== undefined) return ran
+    if ((e.tool === 'Edit' || e.tool === 'Write') && !ran.isError) await markFixed($, e.file_path)
     if (fixes.length > 0 && !ran.isError) {
       for (const f of fixes) archaeologySeen.add(`${edited}|${f.hash}`)
       stats.archaeology += 1
@@ -1370,7 +1404,7 @@ export const register: Register = (on, opts) => {
       const found = findCheats(e.file_path, before, after)
       if (found.length > 0) {
         stats.cheatsFlagged += 1
-        flag('antiCheat', `${e.file_path}: ${found[0]} after ${turnFailure}`)
+        flag('antiCheat', `${e.file_path}: ${found[0]} after ${turnFailure}`, 'toast', { file: e.file_path, lines: cheatLines(before, after) })
         ran = { ...ran, context: [...(ran.context ?? []), cheatNote(e.file_path, found, turnFailure)] }
       }
     }
@@ -1403,7 +1437,10 @@ export const register: Register = (on, opts) => {
       if (risks.length > 0) {
         for (const r of risks) toldOnce.add(`${e.file_path}|${r}`)
         stats.migrationRisks += risks.length
-        flag('migrationGate', `${e.file_path}: ${risks.length} statement(s) can lock or break a live table`)
+        flag('migrationGate', `${e.file_path}: ${risks.length} statement(s) can lock or break a live table`, 'toast', {
+          file: e.file_path,
+          lines: added.filter(l => risks.some(r => r.includes(l.trim().slice(0, 100)))),
+        })
         ran = { ...ran, context: [...(ran.context ?? []), migrationNote(e.file_path, risks)] }
       }
     }
@@ -1470,7 +1507,11 @@ export const register: Register = (on, opts) => {
 
   // Automatic Chong Li review: only a big or risky change, never a chat turn.
   on('turn.complete', async ($, e, next) => {
-    if (!e.agentId) setWorking(false)
+    if (!e.agentId) {
+      setWorking(false)
+      closeKept()
+      turnNo += 1
+    }
     // the reviews below finish after the turn: the turn's one toast waits for them
     const work: Promise<unknown>[] = []
     if (isOn('chongLi') && !e.agentId && unreviewed.length > 0 && (turnLines >= BIG_CHANGE || isTurnRisky) && !isReviewing) {
@@ -1495,11 +1536,12 @@ export const register: Register = (on, opts) => {
     }
     if (isOn('cleanRoom') && !e.agentId && turnAdded.size > 0) {
       const added = turnAdded
-      work.push(cleanRoom($, added).then(items => {
-        if (items.length === 0) return
-        stats.cleanRoom += items.length
-        for (const i of items) flag('cleanRoom', i)
-        notes.push(cleanRoomNote(items))
+      const turn = turnNo
+      work.push(cleanRoom($, added).then(found => {
+        if (found.length === 0) return
+        stats.cleanRoom += found.length
+        for (const i of found) flag('cleanRoom', i.text, 'toast', { file: i.file, lines: i.lines, turn })
+        notes.push(cleanRoomNote(found.map(i => i.text)))
       }).catch(() => {}))
     }
     if (!e.agentId) {
@@ -1692,6 +1734,13 @@ export const register: Register = (on, opts) => {
       void checkAll($)
       return say('Hi-yah!')
     }
+    if (sub === 'reset') {
+      const had = [...overrides.entries()].map(([k, v]) => `${titleOf(k)} ${v ? 'on' : 'off'}`).concat(sessionProfile ? [`profile ${sessionProfile}`] : [])
+      overrides.clear()
+      sessionProfile = undefined
+      frozen = undefined
+      return say(`${had.length ? `Back to /config (undid ${had.join(', ')})` : 'Nothing to reset: already as /config has it'}.\n\n${switchesText()}`)
+    }
     if (sub === 'on' || sub === 'off') {
       const key = findSwitch(arg)
       if (!key) return say(`No switch named "${arg}". Names: ${GROUPS.flatMap(([, s]) => s.map(x => x.key)).join(', ')}`)
@@ -1731,7 +1780,7 @@ export const register: Register = (on, opts) => {
       if (missing.length === 0) return { text: 'Nothing to install: all set.', isTextDisplayOnly: true }
       const lines: string[] = []
       for (const r of missing) {
-        $.ui.toast(`Instalando ${r.id}...`)
+        $.ui.toast(`Installing ${r.id}...`)
         lines.push(await install($, r.id))
       }
       isListShown = true

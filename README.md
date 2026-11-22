@@ -57,7 +57,7 @@ Also in the box: an adversarial Haiku review of risky diffs (Chong Li), an end-o
 | Command | What it does |
 |---|---|
 | `/van-code:setup [items]` | Installs the missing recommended tools; with names, optional ones too (`/van-code:setup playwright`) |
-| `/van-code` | Every switch by group, on or off and how often it fired. `off <feature>` / `on <feature>` for this session, `profile full\|light\|minimal`, `intro` (the flying kick, Hi-yah!) |
+| `/van-code` | Every switch by group, on or off and how often it fired. `off <feature>` / `on <feature>` for this session, `profile full\|light\|minimal`, `reset`, `intro` (the flying kick, Hi-yah!) |
 | `/van-code:log` | The last 20 times the mod stepped in: when, which behavior, on what |
 | `/van-code:stats` | Session scoreboard: what was saved and blocked, last request's cost and cache hit rate, average cost per request, and the last 30 days |
 | `/van-code:scan` | Finds official AI resources (plugins, skills, `llms.txt`) for your project's dependencies. See [Stack scan](docs/features.md#stack-scan) |
