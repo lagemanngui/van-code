@@ -39,17 +39,18 @@ It installs the recommended tools: [`rtk`](https://github.com/rtk-ai/rtk) for le
 - **Kept to what you asked.** A dependency or config file your request never named is flagged where it was added, and after a big turn Haiku lists what was done unasked, or left out.
 - **Code with a history is respected.** An edit that removes lines a past fix put there gets that fix's commit (`git blame` finds it), so Claude checks the bug doesn't come back.
 - **Safe to deploy.** A migration that would lock a big table or break the running code (`DROP COLUMN`, `NOT NULL` without a default, an index without `CONCURRENTLY`) gets the expand-and-contract form instead, and a `.proto` or Avro change that breaks consumers is caught against the last commit.
+- **A colleague's PR, triaged before you read it.** `/van-code:review` runs the same checks over a branch or a PR, from any folder (`org/repo#123`), and hands back the files in risk order with numbered comment drafts. No tokens; `--claude` has Claude prove or drop each blocker.
 - **Safety rails for infra and git.** `terraform apply`, `kubectl`/`helm` changes and cloud deletes wait for a plan or dry run; `reset --hard` over uncommitted work and force pushes are held once.
 
-Also in the box: `/van-code:review`, which triages a colleague's branch or PR with the same checks before you read it; an adversarial Haiku review of risky diffs (Chong Li), an end-of-turn clean-room check (debug leftovers, raw payloads or secrets in logs, a query per loop item, unbounded `Promise.all`, `localhost` URLs, undocumented env vars, imports that only work on macOS), receipts that check the final answer against the tool output, compaction that keeps your constraints, and a band showing rate limits and the prompt cache countdown.
+Also in the box: an adversarial Haiku review of risky diffs (Chong Li), an end-of-turn clean-room check (debug leftovers, raw payloads or secrets in logs, a query per loop item, unbounded `Promise.all`, `localhost` URLs, undocumented env vars, imports that only work on macOS), receipts that check the final answer against the tool output, compaction that keeps your constraints, and a band showing rate limits and the prompt cache countdown.
 
 **→ [See all features, settings and the tools `/van-code:setup` installs](docs/features.md)**
 
 ## When not to use it
 
 - **You are prototyping and want Claude unconstrained.** For a throwaway demo, the checks that protect a production codebase are friction.
-- **You want the cheapest possible session.** The mod adds about 2k tokens of instructions to each request (prompt-cached) and some Haiku calls. It buys care, not a lower bill: see [Cost](#cost).
-- **You don't want Claude Code's behavior changed.** The guards refuse reads and hold commands by design. Each one can be turned off in `/config`, but if you'd turn most of them off, a lighter setup will suit you better.
+- **You want the cheapest possible session.** The mod adds about 2k tokens of instructions to each request (prompt-cached) and some Haiku calls. It buys care, not a lower bill: see [Cost](#cost). The `minimal` profile drops both and keeps only the safety rails and read savings.
+- **You don't want Claude Code's behavior changed.** The guards refuse reads and hold commands by design. Each one can be turned off in `/config` (or a group at once with a profile), but if you'd turn most of them off, a lighter setup will suit you better.
 - **Windows without WSL.** The setup relies on Homebrew or Linux installers, and that combination is untested.
 
 ## Commands
@@ -72,7 +73,7 @@ Every automatic behavior has a switch in `/config`, all on by default, and a **P
 
 Most of the mod is local code in hooks and spends no tokens. What does spend them:
 
-- Its instructions in the system prompt, about 2k tokens per request. They stay fixed for the whole conversation, so after the first request they are read from the prompt cache.
+- Its instructions in the system prompt, about 2k tokens per request (most of it the ADHD output style). They stay fixed for the whole conversation, so after the first request they are read from the prompt cache. The `minimal` profile, or turning off `rules` and `adhd`, removes them.
 - Haiku calls: Chong Li (only on big or risky changes), the intent diff (only on turns of 30 or more changed lines) and reply suggestions (only when Claude Code shows none). All show in `/van-code:stats`.
 
 The [`bench/`](bench/README.md) folder runs the same tasks with and without the mod. On its five small cases the pass rate was the same with and without it, and the median cost went from 11% cheaper to 33% more expensive. Where it should pay off is a big repo: a whole read of a 0.9 MB lockfile is about 200k tokens, a hundred times the instructions. The bench does not measure that case yet.
@@ -88,11 +89,15 @@ To run a working copy, add its folder to `CLAUDE_CODE_PLUGIN_DIRS` in the `env` 
 
 | File | Contents |
 |---|---|
-| `hooks/register.tsx` | The hooks: guards, checks, reviews, suggestions and the band above the prompt |
-| `hooks/factory.ts` | Factory equipment: checks and installs |
+| `hooks/register.tsx` | The hooks: guards, checks, reviews, suggestions, the commands and the band above the prompt |
 | `hooks/checks.ts` | Post-edit checkers and the affected-tests search |
-| `hooks/usage.ts` | The usage header and the cache countdown |
-| `hooks/intro.ts` | The pixel-art intro |
+| `hooks/cheats.ts`, `cleanroom.ts`, `migrations.ts`, `schemas.ts`, `archaeology.ts`, `intent.ts` | The production checks, as pure functions over text (shared by the hooks and `/van-code:review`) |
+| `hooks/review.ts` | `/van-code:review`: risk tiers, findings per file, the report |
+| `hooks/switches.ts` | Switch groups, profiles, the 30-day history and the turn's toast |
+| `hooks/infra.ts`, `git.ts`, `attribution.ts`, `reads.ts`, `outline.ts`, `receipts.ts`, `loops.ts`, `card.ts` | The guards' and checks' parsers |
+| `hooks/factory.ts`, `kitty.ts`, `stack.ts`, `scan.ts`, `official.ts`, `community.ts` | Factory equipment and the stack scan |
+| `hooks/usage.ts`, `intro.ts` | The usage header, the cache countdown and the pixel-art intro |
+| `commands/` | The `/van-code:<name>` commands (each answered by a hook in `register.tsx`) |
 | `bench/` | Cost and correctness benchmark against plain Claude Code |
 
 ## License
