@@ -70,3 +70,29 @@ export function caseMiss(segment: string, entries: string[]): string | undefined
 export const cleanRoomNote = (items: string[]) =>
   `[Jean-Claude Van Code] Clean-room check of your last changes (they work here, and can break elsewhere):\n${items.map(i => `- ${i}`).join('\n')}\n` +
   'Fix each one, or tell the user in one line why it stays.'
+
+// Scale traps: fine with ten rows in a test, wrong with ten thousand in production.
+// Every item started at once: `Promise.all(xs.map(...))`, `asyncio.gather(*[... for ...])`.
+const UNBOUNDED = /\bPromise\.all(Settled)?\(\s*[\w.$[\]]+\.map\(|\basyncio\.gather\(\s*\*\s*[[(].*\bfor\b/
+export const isUnbounded = (line: string) => UNBOUNDED.test(line) && !/\blimit\w*\(|\bchunk|\bbatch|\bslice\(/i.test(line)
+
+// A database or network call: awaited I/O, or a Django/SQLAlchemy query.
+const IO_CALL =
+  /\bawait\s+[\w.$]*\b(find\w*|get\w*|fetch\w*|query\w*|select\w*|load\w*|request|call|exec\w*|send|post|put|patch|delete|update\w*|insert\w*|upsert\w*|count)\s*\(|\bawait\s+(fetch|axios[\w.]*|got|db|prisma[\w.]*|knex)\b|\.objects\.(get|filter)\(|\bsession\.(query|get|execute)\(/
+export const isIoCall = (line: string) => IO_CALL.test(line)
+const LOOP = /^\s*(for\s*\((?!.*\bawait\b)|for\s+(?!await\b).*\b(of|in)\b|while\b)|\.(forEach|map)\(\s*(async\s*)?\(?[\w, {}]*\)?\s*=>/
+const FUNCTION = /^\s*((export\s+)?(async\s+)?function\b|(async\s+)?def\b|class\b)|=>\s*\{?\s*$/
+const indentOf = (l: string) => l.length - l.trimStart().length
+
+// The loop enclosing line `i`, walking out through the blocks around it, or undefined (a function boundary stops the walk).
+export function loopAround(lines: string[], i: number): number | undefined {
+  let level = indentOf(lines[i]!)
+  for (let j = i - 1; j >= 0 && j >= i - 12; j--) {
+    const l = lines[j]!
+    if (!l.trim() || indentOf(l) >= level) continue
+    level = indentOf(l)
+    if (LOOP.test(l)) return j
+    if (FUNCTION.test(l) && !LOOP.test(l)) return undefined
+  }
+  return undefined
+}

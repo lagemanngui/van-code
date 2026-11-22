@@ -41,7 +41,7 @@ It installs the recommended tools: [`rtk`](https://github.com/rtk-ai/rtk) for le
 - **Safe to deploy.** A migration that would lock a big table or break the running code (`DROP COLUMN`, `NOT NULL` without a default, an index without `CONCURRENTLY`) gets the expand-and-contract form instead, and a `.proto` or Avro change that breaks consumers is caught against the last commit.
 - **Safety rails for infra and git.** `terraform apply`, `kubectl`/`helm` changes and cloud deletes wait for a plan or dry run; `reset --hard` over uncommitted work and force pushes are held once.
 
-Also in the box: an adversarial Haiku review of risky diffs (Chong Li), an end-of-turn clean-room check (debug leftovers, raw payloads or secrets in logs, `localhost` URLs, undocumented env vars, imports that only work on macOS), receipts that check the final answer against the tool output, compaction that keeps your constraints, and a band showing rate limits and the prompt cache countdown.
+Also in the box: an adversarial Haiku review of risky diffs (Chong Li), an end-of-turn clean-room check (debug leftovers, raw payloads or secrets in logs, a query per loop item, unbounded `Promise.all`, `localhost` URLs, undocumented env vars, imports that only work on macOS), receipts that check the final answer against the tool output, compaction that keeps your constraints, and a band showing rate limits and the prompt cache countdown.
 
 **→ [See all features, settings and the tools `/van-code-setup` installs](docs/features.md)**
 

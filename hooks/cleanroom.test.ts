@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { caseMiss, declaredDeps, envVars, importSpecs, isAlias, isDebug, isDocumented, isPiiLog, packageOf } from './cleanroom.js'
+import { caseMiss, declaredDeps, envVars, importSpecs, isAlias, isDebug, isDocumented, isIoCall, isPiiLog, isUnbounded, loopAround, packageOf } from './cleanroom.js'
 
 test('clean-room helpers: debug lines, env vars, imports, packages, case', () => {
   expect(['logger.info(req.body)', "log.error('bad', event.payload)", 'console.log({ password })', "logger.error('invalid token')", 'logger.info(order.id)', 'const token = req.headers.authorization'].map(isPiiLog)).toEqual([true, true, true, false, false, false])
@@ -20,7 +20,7 @@ test('clean-room helpers: debug lines, env vars, imports, packages, case', () =>
 
 test('at turn end, what the turn added and left in is reported; what it removed again is not', async ($, on) => {
   const files: Record<string, string> = {
-    '/r/src/pay.ts': "import { Btn } from './Button'\nimport z from 'zod'\nimport { u } from '@app/utils'\nconst key = process.env.STRIPE_KEY\nconst api = 'http://localhost:3000/api'\nconsole.log(key)\nconsole.log(key)",
+    '/r/src/pay.ts': "import { Btn } from './Button'\nimport z from 'zod'\nimport { u } from '@app/utils'\nconst key = process.env.STRIPE_KEY\nconst api = 'http://localhost:3000/api'\nconsole.log(key)\nconsole.log(key)\nfor (const e of events) {\n  const c = await db.customer.findUnique({ where: { id: e.id } })\n}\nawait Promise.all(events.map(e => send(e)))",
     '/r/.env.example': 'DB_URL=\n',
     '/r/package.json': '{"dependencies":{"react":"18"}}',
     '/r/tsconfig.json': '{ "compilerOptions": { "paths": { "@app/*": ["src/*"] } } }',
@@ -58,4 +58,29 @@ test('at turn end, what the turn added and left in is reported; what it removed 
   expect(said).toContain("imports `./Button` but the file is `button.tsx`")
   expect(said).toContain('imports `zod`, not declared in package.json')
   expect(said).not.toContain('@app/utils') // a tsconfig paths alias, not a package
+  expect(said).toContain('runs once per item of the loop at L8')
+  expect(said).toContain('starts every item at once')
+})
+
+test('scale traps: a query per loop item, and every item started at once', () => {
+  const ts = [
+    'export async function enrich(events: Event[]) {',
+    '  for (const e of events) {',
+    '    if (e.customerId) {',
+    '      const c = await db.customer.findUnique({ where: { id: e.customerId } })',
+    '    }',
+    '  }',
+    '  const one = await db.customer.findMany({ where: { id: { in: ids } } })',
+    '  for await (const row of stream) {',
+    '    await sink.send(row)',
+    '  }',
+    '}',
+  ]
+  expect(loopAround(ts, 3)).toBe(1) // through the if, out to the for
+  expect(loopAround(ts, 6)).toBeUndefined() // outside any loop: the function stops the walk
+  expect(loopAround(ts, 8)).toBeUndefined() // for await streams one at a time by design
+  const py = ['def sync(orders):', '    for o in orders:', '        user = User.objects.get(id=o.user_id)']
+  expect(loopAround(py, 2)).toBe(1)
+  expect(['await db.customer.findUnique({})', 'const x = await fetch(url)', 'User.objects.get(id=1)', 'await sleep(10)', 'total += o.amount'].map(isIoCall)).toEqual([true, true, true, false, false])
+  expect(['await Promise.all(events.map(e => process(e)))', 'await asyncio.gather(*[fetch(u) for u in urls])', 'await Promise.all(chunk.map(e => process(e)))', 'await Promise.all([a(), b()])'].map(isUnbounded)).toEqual([true, true, false, false])
 })

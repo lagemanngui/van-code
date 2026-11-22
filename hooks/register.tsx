@@ -6,7 +6,7 @@ import { cheatNote, findCheats } from './cheats.js'
 import { outline } from './outline.js'
 import { archaeologyNote, fixesRemoved, parseBlame, removedLines } from './archaeology.js'
 import { addedDeps, CONFIG, configNote, depNote, installedDeps, INTENT_SYSTEM, intentFindings, isConfigNamed, isNamed, MANIFEST } from './intent.js'
-import { caseMiss, cleanRoomNote, declaredDeps, envVars, importSpecs, isAlias, isDebug, isDocumented, isLocalhost, isPiiLog, packageOf } from './cleanroom.js'
+import { caseMiss, cleanRoomNote, declaredDeps, envVars, importSpecs, isAlias, isDebug, isDocumented, isIoCall, isLocalhost, isPiiLog, isUnbounded, loopAround, packageOf } from './cleanroom.js'
 import { MIGRATION, migrationNote, migrationRisks } from './migrations.js'
 import { SCHEMA_FILE, schemaBreaks, schemaNote } from './schemas.js'
 import { findAttribution } from './attribution.js'
@@ -582,6 +582,18 @@ async function cleanRoom($: EngineInterface, added: Map<string, Set<string>>): P
       items.push(`${name}: debug leftover \`${debugNew[0]!.slice(0, 80)}\`${debugNew.length > 1 ? ` (+${debugNew.length - 1} more)` : ''}`)
     const pii = still.filter(isPiiLog)
     if (!isTest && pii.length > 0) items.push(`${name}: logs raw request data or a secret \`${pii[0]!.slice(0, 80)}\` (log the fields you need, masked)`)
+    // scale traps: one round trip per item, or every item at once
+    if (!isTest && /\.([cm]?[jt]sx?|py)$/.test(file)) {
+      const raw = text.split('\n')
+      for (const l of still.filter(isIoCall)) {
+        const i = raw.findIndex(r => r.trim() === l)
+        const loop = i === -1 ? undefined : loopAround(raw, i)
+        if (loop !== undefined)
+          items.push(`${name}: \`${l.slice(0, 70)}\` runs once per item of the loop at L${loop + 1}: 10,000 items is 10,000 round trips (one query for all of them, or a cache)`)
+      }
+      const burst = still.filter(isUnbounded)
+      if (burst.length > 0) items.push(`${name}: \`${burst[0]!.slice(0, 70)}\` starts every item at once: 20,000 items is 20,000 calls in flight (bound it: a small worker pool, or chunks)`)
+    }
     const local = still.filter(isLocalhost)
     if (!isTest && local.length > 0) items.push(`${name}: hardcoded local URL \`${local[0]!.slice(0, 80)}\` (works on this machine only)`)
     const vars = envVars(still)
