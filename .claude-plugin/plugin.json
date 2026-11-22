@@ -4,6 +4,13 @@
   "description": "Jean-Claude Van Code: production discipline for Claude Code. Proof before done, no silenced failures, nothing that passes locally and breaks the deploy",
   "keywords": ["claude-code", "hooks", "token-optimization", "prompt-caching", "code-review", "developer-tools"],
   "userConfig": {
+    "profile": {
+      "type": "string",
+      "title": "Profile",
+      "description": "full: every switch below as set. light: no Haiku calls or end-of-turn reviews (Chong Li, intent diff, reply suggestions, archaeology, clean-room, card plan). minimal: only the safety rails and read savings. /van-code profile changes it for one session.",
+      "options": ["full", "light", "minimal"],
+      "default": "full"
+    },
     "intro": {
       "type": "boolean",
       "title": "Intro animation",
@@ -13,7 +20,7 @@
     "guard": {
       "type": "boolean",
       "title": "Heavy-file guard",
-      "description": "Blocks whole reads of lockfiles, node_modules, build output and minified files. /van-code-guard toggles it for the session.",
+      "description": "Blocks whole reads of lockfiles, node_modules, build output and minified files. /van-code:guard toggles it for the session.",
       "default": true
     },
     "readMemory": {
@@ -79,7 +86,7 @@
     "chongLi": {
       "type": "boolean",
       "title": "Automatic Chong Li",
-      "description": "A cheap adversarial review (Haiku) of big or risky changes. /chong-li always works.",
+      "description": "A cheap adversarial review (Haiku) of big or risky changes. /van-code:chong-li always works.",
       "default": true
     },
     "suggestions": {

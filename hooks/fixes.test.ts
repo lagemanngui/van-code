@@ -64,7 +64,7 @@ test('the scoreboard counts a skipped repeat read', async ($, on) => {
   const read = () => $.tool.call({ tool: 'Read', file_path: '/p/a.ts' })
   await read()
   await read()
-  const r = await $.command.run({ command: 'van-code-stats', args: '' } as never)
+  const r = await $.command.run({ command: 'van-code:stats', args: '' } as never)
   expect(String(r.text)).toContain('Repeat reads skipped: 1 (~1.0k tokens)')
 })
 
@@ -97,7 +97,7 @@ test('after installing a plugin, setup reloads the plugins by itself', async ($,
     ran.push(e.command)
     return { text: '' }
   })
-  const r = await $.command.run({ command: 'van-code-setup', args: 'commit-commands' } as never)
+  const r = await $.command.run({ command: 'van-code:setup', args: 'commit-commands' } as never)
   expect(String(r.text)).toContain('commit-commands: installed')
   await clock.advance(1_000)
   expect(ran).toContain('reload-plugins')

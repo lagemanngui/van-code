@@ -45,7 +45,7 @@ const setup = async (
   })
   on('ui.toast', () => ({ value: undefined }) as never)
   on('clock.after', () => ({ value: { cancel: () => {} } }) as never)
-  const r = await $.command.run({ command: 'van-code-setup', args: 'kitty' } as never)
+  const r = await $.command.run({ command: 'van-code:setup', args: 'kitty' } as never)
   return { ran, wrote, asked, text: String((r as { text?: string }).text) }
 }
 

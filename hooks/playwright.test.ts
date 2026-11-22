@@ -72,9 +72,9 @@ test('without playwright-cli the person is offered the setup once; setup install
   await $.tool.call(edit('/p/src/App.tsx'))
   await $.turn.complete({ answer: 'ok' } as never)
   await settle()
-  expect(w.toasts.some(t => t.includes('/van-code-setup playwright'))).toBe(true)
+  expect(w.toasts.some(t => t.includes('/van-code:setup playwright'))).toBe(true)
 
-  await $.command.run({ command: 'van-code-setup', args: 'playwright' } as never)
+  await $.command.run({ command: 'van-code:setup', args: 'playwright' } as never)
   expect(w.ran).toContain('npm install -g @playwright/cli@latest')
   expect(w.ran).toContain('playwright-cli install --skills')
 })

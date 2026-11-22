@@ -20,7 +20,7 @@ Everything Jean-Claude Van Code does, how each guard decides, and every switch. 
 - **Outline first.** A whole Read of a code file over 400 lines, with no offset or limit, is refused once with the file's outline: each function, class, type and method with its line range (a range runs to the next declaration). Claude then reads only the part it needs with offset/limit. Files it already read in part, and files with fewer than 3 declarations, pass. Reading again with the same arguments goes through. Line patterns cover TypeScript/JavaScript, Python, Go, Rust, Ruby, Swift, Kotlin, PHP, Java and C#.
 - **Post-edit check.** Right after every edit, the language's own checker runs on that file (`tsc` from the project, incremental with its build info in the session scratchpad so later checks reuse the last one, `ruff` or `py_compile`, `go vet`, `bash -n`). Infra files too, when the tool is installed: `terraform`/`tofu validate` in an initialised folder (`fmt`, which still catches syntax errors, otherwise), `helm lint` on the chart a file belongs to, and `kubeconform` on Kubernetes manifests (a YAML file with `apiVersion` and `kind`). Errors ride back on the edit's result so Claude fixes them before moving on. When one response makes several edits, the check waits for the last of them and then checks every file the batch touched, so an error the next edit of the same response fixes is never reported. When the same error comes back after 2 edits of a file (a structural error: a type or signature mismatch, which retrying rarely fixes), Claude is told to stop patching the line and fix it at its source. Zero tokens when clean.
 - **Prove it works.** If Claude edits code and the turn ends with no test, build or type-check, it is asked to verify on your next message, with the list of tests that cover the change, or a syntax check to run when no test covers it. When no test reaches the edited files and the post-edit check passed on all of them, that check is the proof and nothing is asked. A run of chosen test files (`vitest run tests/x.test.ts`, `pytest tests/test_x.py`) counts only if one of them reaches the edited code; otherwise Claude is told those tests prove nothing about the change and is given the ones that do. Syntax checks count: `bash -n`, `sh -n`, `shellcheck`, `node --check`, `python -m py_compile`. Reading or committing a test (`cat x.test.ts`, `git commit -m "tests"`) does not.
-- **UI check.** In a repo with a web frontend, when Claude changes a user-facing file (`.tsx`, `.jsx`, `.vue`, `.svelte`, `.astro`, `.html`, `.css`) and no browser ran in that turn, it is asked on your next message to walk the flow with `playwright-cli` as a user would, or say in one line why the change needs none. Once per file. Without `playwright-cli`, you get one notice offering `/van-code-setup playwright`. A `playwright` command (or the official Playwright plugin's tools) counts as verification.
+- **UI check.** In a repo with a web frontend, when Claude changes a user-facing file (`.tsx`, `.jsx`, `.vue`, `.svelte`, `.astro`, `.html`, `.css`) and no browser ran in that turn, it is asked on your next message to walk the flow with `playwright-cli` as a user would, or say in one line why the change needs none. Once per file. Without `playwright-cli`, you get one notice offering `/van-code:setup playwright`. A `playwright` command (or the official Playwright plugin's tools) counts as verification.
 - **Affected tests.** The `affected_tests` tool follows imports (via `git grep`, up to 4 levels) from a changed file to the tests that reach it, so Claude runs 3 tests instead of 300. Each file is searched in its own git repository, so changes across sibling repos get each repo's tests. Works for TypeScript/JavaScript, Python and Go.
 - **Card plan.** When your message reads as a pasted card (a user story, a bug report or a task card, in Portuguese or English: "critérios de aceite", "steps to reproduce", "como um ... quero", Given/When/Then, or a ticket key like PAY-482 in a structured text; a message over 4,000 characters needs two such markers, so a long document that mentions one in passing is not a card), Claude is told, along with the card, to plan before coding. A story: list each acceptance criterion as a target, ask only what is ambiguous in a way that changes what gets built, keep to the story. A bug: reproduce it first (a failing test, or the steps walked in a browser), then fix and show the same reproduction passing. With the `diagnosing-bugs` skill installed, a bug whose cause is not plain is routed to its full loop. Saying "done" with a target open gets flagged.
 - **Assumption ledger.** On a non-trivial task, the `assumptions` tool records what the plan rests on and the cheapest proof for each item, before any code is written. The ledger shows live above the prompt. Saying "done" with open assumptions gets flagged.
@@ -46,19 +46,19 @@ Everything Jean-Claude Van Code does, how each guard decides, and every switch. 
 
 ## Stack scan
 
-`/van-code-scan` looks for official AI resources for the frameworks and libraries you use, then for community ones where there are none. It runs only when you ask, since it uses the network.
+`/van-code:scan` looks for official AI resources for the frameworks and libraries you use, then for community ones where there are none. It runs only when you ask, since it uses the network.
 
 1. **Dependencies.** It reads the declared dependencies of each repo (`package.json`, `pyproject.toml`, `requirements.txt`, `go.mod`, `composer.json`, `pubspec.yaml`) and finds each one's repository: from what is installed (`node_modules`, `.venv`, `vendor`, `~/.pub-cache`), else from its registry. The owner of that repository (github.com/nestjs) is the official channel. Owners behind more runtime packages come first; dev tools count half and `@types/*` not at all.
 2. **Official.** For the top 15 owners: a plugin of Anthropic's catalog built from their repos, a Claude Code plugin marketplace or a published skills folder in their GitHub org (found with `gh`), and an `llms.txt` on their docs site. MCP repos are listed to look at, not to install.
 3. **Community.** For the owners with nothing official, the most installed matching skills on [skills.sh](https://skills.sh), marked "review before installing". Generic package names (under 5 letters) get none, since they match unrelated skills.
 
-The result is a numbered list; nothing installs until you run `/van-code-scan install <n>`. The scan is saved with a hash of each repo's manifests, so running it again with no dependency change shows the saved result at once (it rescans after 7 days, or with `refresh`). On session start the mod compares those hashes, without the network, and says `Dependências novas em <repo>: rode /van-code-scan` when one changed.
+The result is a numbered list; nothing installs until you run `/van-code:scan install <n>`. The scan is saved with a hash of each repo's manifests, so running it again with no dependency change shows the saved result at once (it rescans after 7 days, or with `refresh`). On session start the mod compares those hashes, without the network, and says `Dependências novas em <repo>: rode /van-code:scan` when one changed.
 
 Needs `gh` logged in (`gh auth status`) for the GitHub search; without it only the docs sites and the local catalog are checked. Community skills install with `npx skills add ... -y` into the folder Claude runs in.
 
 ## Factory equipment
 
-On start, the mod checks these and lists them above the prompt. Run from a folder that holds several repos side by side (not a monorepo), it also looks one level down: each subfolder with a `.git` counts for the language servers and infra checkers it recommends, and `/chong-li` reviews the uncommitted changes of every one of those repos. `/van-code-setup` installs what is missing.
+On start, the mod checks these and lists them above the prompt. Run from a folder that holds several repos side by side (not a monorepo), it also looks one level down: each subfolder with a `.git` counts for the language servers and infra checkers it recommends, and `/van-code:chong-li` reviews the uncommitted changes of every one of those repos. `/van-code:setup` installs what is missing.
 
 | Item | What it is | Installed with |
 |---|---|---|
@@ -80,9 +80,19 @@ On start, the mod checks these and lists them above the prompt. Run from a folde
 
 Installing needs Homebrew (for `rtk` and some language servers), `npm` (for the TypeScript and Python language servers) and GitHub access.
 
+## Seeing and steering it
+
+- **`/van-code`** shows every switch by group (Reading, Editing, Proof, Rails, Session): on with how many times it fired this session, or off and by what (`/config`, the profile, or this session).
+- **`/van-code off <feature>`** and **`on <feature>`** change one switch for this session only, by key or title (`/van-code off chong li`). `/config` keeps a change for good. `/van-code:guard` still toggles the heavy-file guard.
+- **`/van-code profile full|light|minimal`** for this session; the **Profile** setting in `/config` keeps it. `light` drops the Haiku calls and end-of-turn reviews (Chong Li, intent diff, reply suggestions, archaeology, clean-room, card plan). `minimal` keeps only the safety rails and read savings (heavy-file guard, read memory, infra and git guards, no AI attribution, compaction restore and trim, usage header, intro).
+- **`/van-code:log`**: the last 20 times the mod stepped in, with the time, the behavior and the file, command or claim, including each time Claude ran a refused call again.
+- **One toast per turn.** Findings collect during the turn and show as one toast when it ends, with how many notes Claude reads with your next message (Chong Li, intent diff, clean-room and "prove it" land then). Infra and git holds still toast at once. Read savings (repeat reads, outlines, diffs, heavy files) only go to the log and the counts.
+- **30 days of counts.** `/van-code:stats` adds what each behavior did over the last 30 days, across sessions, and names a switch Claude went past at least half of the times it fired (5 or more), as a likely false block in this setup.
+- **`/van-code intro`** replays the flying kick.
+
 ## Settings
 
-Every automatic behavior has a switch in the plugin's settings (`/config`), all on by default:
+Every automatic behavior has a switch in the plugin's settings (`/config`), all on by default, plus the **Profile** picker above them (`full` by default):
 
 | Key | Behavior |
 |---|---|
@@ -98,7 +108,7 @@ Every automatic behavior has a switch in the plugin's settings (`/config`), all 
 | `migrationGate` | Migration gate |
 | `schemaGuard` | Schema guard |
 | `archaeology` | Archaeology |
-| `chongLi` | Automatic Chong Li (`/chong-li` always works) |
+| `chongLi` | Automatic Chong Li (`/van-code:chong-li` always works) |
 | `suggestions` | Reply suggestions |
 | `contextAlarm` | Context alarm |
 | `rules` | Van Code rules |

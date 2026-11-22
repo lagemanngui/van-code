@@ -10,7 +10,7 @@ export const KITTY_APPS = ['/Applications/kitty.app', '~/Applications/kitty.app'
 export function kittyConf(platform: Platform): string {
   const mac = platform === 'macos'
   return [
-    '# Written by Jean-Claude Van Code (/van-code-setup kitty); edit freely.',
+    '# Written by Jean-Claude Van Code (/van-code:setup kitty); edit freely.',
     ...(mac ? ['font_family      JetBrains Mono'] : []),
     'font_size        14.0',
     'remember_window_size  yes',

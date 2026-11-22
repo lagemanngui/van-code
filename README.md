@@ -23,14 +23,14 @@ Or at the prompt of a Claude Code session, `/plugin install van-code --marketpla
 Then run this once in a session:
 
 ```
-/van-code-setup
+/van-code:setup
 ```
 
 It installs the recommended tools: [`rtk`](https://github.com/rtk-ai/rtk) for leaner command output, language servers, and a few official plugins. The full list is in [Factory equipment](docs/features.md#factory-equipment). You'll know it worked when the flying-kick intro plays on the next start.
 
 ## Why use it
 
-> **31 automatic behaviors, switched in `/config`.** The highlights are below; every one is explained in the **[full feature reference →](docs/features.md)**.
+> **31 automatic behaviors, switched in `/config` or for one session with `/van-code off <feature>`.** The highlights are below; every one is explained in the **[full feature reference →](docs/features.md)**.
 
 - **"Done" has to be earned.** If code changed and nothing ran, Claude is asked to verify and handed the exact tests that reach the change (`affected_tests` follows the imports). Tests that don't touch the edited code don't count.
 - **No cheating to get green.** After a failing check or test, an edit that silences it instead of fixing it (`as any`, `@ts-ignore`, a skipped test, `|| true`, a removed assertion) is flagged on the spot.
@@ -43,7 +43,7 @@ It installs the recommended tools: [`rtk`](https://github.com/rtk-ai/rtk) for le
 
 Also in the box: an adversarial Haiku review of risky diffs (Chong Li), an end-of-turn clean-room check (debug leftovers, raw payloads or secrets in logs, a query per loop item, unbounded `Promise.all`, `localhost` URLs, undocumented env vars, imports that only work on macOS), receipts that check the final answer against the tool output, compaction that keeps your constraints, and a band showing rate limits and the prompt cache countdown.
 
-**→ [See all features, settings and the tools `/van-code-setup` installs](docs/features.md)**
+**→ [See all features, settings and the tools `/van-code:setup` installs](docs/features.md)**
 
 ## When not to use it
 
@@ -56,22 +56,23 @@ Also in the box: an adversarial Haiku review of risky diffs (Chong Li), an end-o
 
 | Command | What it does |
 |---|---|
-| `/van-code-setup [items]` | Installs the missing recommended tools; with names, optional ones too (`/van-code-setup playwright`) |
-| `/van-code-stats` | Session scoreboard: what was saved and blocked, last request's cost and cache hit rate, average cost per request |
-| `/van-code-scan` | Finds official AI resources (plugins, skills, `llms.txt`) for your project's dependencies. See [Stack scan](docs/features.md#stack-scan) |
-| `/chong-li` | Adversarial review of the latest changes: one concrete way they break, or nothing |
-| `/van-code-guard` | Turns the heavy-file guard off or on for this session |
+| `/van-code:setup [items]` | Installs the missing recommended tools; with names, optional ones too (`/van-code:setup playwright`) |
+| `/van-code` | Every switch by group, on or off and how often it fired. `off <feature>` / `on <feature>` for this session, `profile full\|light\|minimal`, `intro` (the flying kick, Hi-yah!) |
+| `/van-code:log` | The last 20 times the mod stepped in: when, which behavior, on what |
+| `/van-code:stats` | Session scoreboard: what was saved and blocked, last request's cost and cache hit rate, average cost per request, and the last 30 days |
+| `/van-code:scan` | Finds official AI resources (plugins, skills, `llms.txt`) for your project's dependencies. See [Stack scan](docs/features.md#stack-scan) |
+| `/van-code:chong-li` | Adversarial review of the latest changes: one concrete way they break, or nothing |
+| `/van-code:guard` | Turns the heavy-file guard off or on for this session (same as `/van-code off guard`) |
 | `/van-code:i-have-adhd` | Turns the ADHD-friendly output style back on after a "stop adhd mode" |
-| `/van-code` | Replays the intro and re-checks the equipment. Hi-yah! |
 
-Every automatic behavior has a switch in `/config`, all on by default: the [full settings list](docs/features.md#settings).
+Every automatic behavior has a switch in `/config`, all on by default, and a **Profile** picker (`full`, `light`, `minimal`) turns groups off at once: the [full settings list](docs/features.md#settings). Findings show as one toast per turn; [Seeing and steering it](docs/features.md#seeing-and-steering-it) has the details.
 
 ## Cost
 
 Most of the mod is local code in hooks and spends no tokens. What does spend them:
 
 - Its instructions in the system prompt, about 2k tokens per request. They stay fixed for the whole conversation, so after the first request they are read from the prompt cache.
-- Haiku calls: Chong Li (only on big or risky changes), the intent diff (only on turns of 30 or more changed lines) and reply suggestions (only when Claude Code shows none). All show in `/van-code-stats`.
+- Haiku calls: Chong Li (only on big or risky changes), the intent diff (only on turns of 30 or more changed lines) and reply suggestions (only when Claude Code shows none). All show in `/van-code:stats`.
 
 The [`bench/`](bench/README.md) folder runs the same tasks with and without the mod. On its five small cases the pass rate was the same with and without it, and the median cost went from 11% cheaper to 33% more expensive. Where it should pay off is a big repo: a whole read of a 0.9 MB lockfile is about 200k tokens, a hundred times the instructions. The bench does not measure that case yet.
 

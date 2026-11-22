@@ -1,4 +1,4 @@
-// /van-code-scan: the stack's official resources for AI agents, then the community's for the rest.
+// /van-code:scan: the stack's official resources for AI agents, then the community's for the rest.
 // On demand only: it reads node_modules and friends, then asks GitHub, the docs sites and skills.sh.
 import type { EngineInterface } from 'claude-code'
 
@@ -76,7 +76,7 @@ const repoOf = (url: string) => url.match(/github\.com\/([^/]+\/[^/]+)/)?.[1] ??
 // what gets installed: the plugin id, else the skills repo
 const nameOf = (cmds: string[]) => cmds.at(-1)!.match(/plugin install (\S+)/)?.[1] ?? cmds.at(-1)!.match(/skills add (\S+)(?: --skill (\S+))?/)?.slice(1).filter(Boolean).join(' ') ?? cmds.at(-1)!
 
-// One line per thing to install, numbered for `/van-code-scan install <n>`; docs and the rest in one line each.
+// One line per thing to install, numbered for `/van-code:scan install <n>`; docs and the rest in one line each.
 export function scanView(owners: Owner[], official: Finding[], community: CommunitySkill[]): { text: string; items: ScanItem[] } {
   const order = new Map(owners.map((o, i) => [o.key, i]))
   const byOwner = <T extends { owner: string }>(xs: T[]) => [...xs].sort((a, b) => (order.get(a.owner) ?? 99) - (order.get(b.owner) ?? 99))
@@ -109,6 +109,6 @@ export function scanView(owners: Owner[], official: Finding[], community: Commun
   const none = owners.filter(o => !has.has(o.key)).map(o => shortOwner(o.key))
   if (none.length > 0) out.push(`Nothing found for: ${none.join(', ')}`)
   out.push('')
-  out.push(items.length > 0 ? 'Install with /van-code-scan install <n> (several: 1 3). Nothing was installed.' : 'Nothing to install.')
+  out.push(items.length > 0 ? 'Install with /van-code:scan install <n> (several: 1 3). Nothing was installed.' : 'Nothing to install.')
   return { text: out.join('\n'), items }
 }

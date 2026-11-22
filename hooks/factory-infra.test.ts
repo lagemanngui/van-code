@@ -16,7 +16,7 @@ test('setup installs the infra checker the repo needs, and only that', async ($,
   on('ui.toast', () => ({ value: undefined }) as never)
   on('clock.after', () => ({ value: { cancel: () => {} } }) as never)
 
-  const r = await $.command.run({ command: 'van-code-setup', args: 'infra' } as never)
+  const r = await $.command.run({ command: 'van-code:setup', args: 'infra' } as never)
   expect(String((r as { text?: string }).text)).toContain('infra Terraform: opentofu installed')
   expect(ran).toContain('brew install opentofu')
   expect(ran.some(a => a === 'brew install helm' || a === 'brew install kubeconform')).toBe(false)

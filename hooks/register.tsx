@@ -18,6 +18,7 @@ import { cacheKey, changedRoots, isStale, manifestHashes, type ScanCache, type S
 import { isCovered, parseShellRead, type Range, READ_DEFAULT_LINES, readRange, resolvePath } from './reads.js'
 import { checkAll, cwd, findRoots, hasWeb, infra, install, isLacking, langs, RECS, roots, run, setCwd, status } from './factory.js'
 import { type Cell, cells, LAST, MAX_W, MIN_W, pixels } from './intro.js'
+import { bump, findSwitch, GROUPS, type History, offHints, PROFILES, prune, titleOf, totals, turnSummary } from './switches.js'
 import {
   animateUsage,
   bar,
@@ -62,9 +63,44 @@ function play($: EngineInterface) {
 
 // Feature switches from the plugin's settings (userConfig); every one defaults on.
 let options: PluginOptions = {}
-const isOn = (feature: string) => options[feature] !== false
+// /van-code on|off and /van-code profile: this session only, over the /config switches.
+const overrides = new Map<string, boolean>()
+let sessionProfile: string | undefined
+const profileOf = () => sessionProfile ?? (typeof options.profile === 'string' && PROFILES[options.profile] ? options.profile : 'full')
+const offBy = (feature: string): 'session' | 'profile' | 'config' | undefined =>
+  overrides.has(feature) ? (overrides.get(feature) ? undefined : 'session')
+  : options[feature] === false ? 'config'
+  : PROFILES[profileOf()]!.includes(feature) ? 'profile'
+  : undefined
+const isOn = (feature: string) => offBy(feature) === undefined
 
-// The session's scoreboard for /van-code-stats. Token figures are estimates (bytes / 4).
+// What the mod did, for /van-code:log, the turn's one toast and the 30-day history.
+type Flag = { at: number; feature: string; text: string }
+const LOG_MAX = 20
+const flagLog: Flag[] = []
+let turnFlags: string[] = []
+const fired: Record<string, number> = {} // this session, by behavior
+let history: History | undefined // loaded once from $.store
+let isHistoryDirty = false
+const HISTORY_KEY = 'history'
+// `toast`: in the turn's summary; `urgent`: the caller toasts it now; `quiet`: log and counts only (read savings).
+function flag(feature: string, text: string, how: 'toast' | 'urgent' | 'quiet' = 'toast') {
+  flagLog.push({ at: Date.now(), feature, text })
+  if (flagLog.length > LOG_MAX) flagLog.shift()
+  fired[feature] = (fired[feature] ?? 0) + 1
+  if (history) bump(history, Date.now(), feature)
+  isHistoryDirty = true
+  if (how === 'toast') turnFlags.push(feature)
+}
+// Claude ran the refused call again: the block was likely wrong here.
+function wentPast(feature: string, what: string) {
+  flagLog.push({ at: Date.now(), feature, text: `Claude went past it: ${what}` })
+  if (flagLog.length > LOG_MAX) flagLog.shift()
+  if (history) bump(history, Date.now(), `${feature}.past`)
+  isHistoryDirty = true
+}
+
+// The session's scoreboard for /van-code:stats. Token figures are estimates (bytes / 4).
 const stats = {
   readsSkipped: 0,
   readTokens: 0,
@@ -164,11 +200,54 @@ const countUsage = (u?: ModelUsage) => {
 const onOff = (b: boolean) => (b ? 'on' : 'off')
 const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
 
+// A switch on or off for this session; /config keeps its own value.
+function setSwitch(key: string, isWanted: boolean): string {
+  overrides.set(key, isWanted)
+  if (key === 'guard' && !isWanted) stats.guardOffs += 1
+  // rules and ADHD mode ride in the system prompt: rebuilt once, at the cost of one uncached request
+  if (key === 'rules' || key === 'adhd' || key === 'noAttribution') frozen = undefined
+  const why = offBy(key)
+  return `${titleOf(key)} ${isWanted ? 'on' : 'off'} for this session${why && why !== 'session' ? ` (still off: ${why})` : ''}. To keep it, change it in /config.`
+}
+
+function switchesText(): string {
+  const WHY = { session: 'off for this session', profile: `off by profile ${profileOf()}`, config: 'off in /config' }
+  const row = (key: string, title: string) => {
+    const why = offBy(key)
+    const state = why ? WHY[why] : fired[key] ? `fired ${fired[key]}x` : ''
+    return `  ${why ? '✗' : '✓'} ${title.padEnd(20)} ${key.padEnd(15)} ${state}`.trimEnd()
+  }
+  const off = GROUPS.flatMap(([, s]) => s).filter(s => !isOn(s.key)).length
+  return [
+    `Jean-Claude Van Code · profile ${profileOf()} · ${GROUPS.flatMap(([, s]) => s).length - off} on, ${off} off`,
+    ...GROUPS.flatMap(([g, s]) => ['', g, ...s.map(x => row(x.key, x.title))]),
+    '',
+    'Change for this session: /van-code off <key> · on <key> · profile full|light|minimal',
+    'More: /van-code:log (what it did) · /van-code:stats (savings, 30 days) · /config keeps a change',
+  ].join('\n')
+}
+
+function logText(): string {
+  if (flagLog.length === 0) return 'Nothing yet: the mod has not stepped in this session.'
+  const hhmm = (ms: number) => new Date(ms).toTimeString().slice(0, 5)
+  return [`Jean-Claude Van Code · the last ${flagLog.length} times it stepped in, newest last`, ...flagLog.map(f => `${hhmm(f.at)}  ${titleOf(f.feature).padEnd(18)} ${f.text}`)].join('\n')
+}
+
+function historyText(): string {
+  const t = totals(history ?? {})
+  const top = Object.entries(t).filter(([k]) => !k.endsWith('.past')).sort((a, b) => b[1] - a[1])
+  if (top.length === 0) return 'Last 30 days: nothing recorded yet'
+  return [
+    `Last 30 days (all sessions): ${top.map(([k, n]) => `${titleOf(k)} ${n}${t[`${k}.past`] ? ` (went past ${t[`${k}.past`]})` : ''}`).join(' · ')}`,
+    ...offHints(t),
+  ].join('\n')
+}
+
 function statsText() {
   return [
     'Jean-Claude Van Code · session scoreboard (token figures are estimates)',
     `Repeat reads skipped: ${stats.readsSkipped} (~${k(stats.readTokens)} tokens) · read memory ${onOff(isOn('readMemory'))}`,
-    `Heavy files blocked: ${stats.heavyBlocked} (~${k(stats.heavyTokens)} tokens) · guard ${onOff(isGuardOn)} · turned off ${stats.guardOffs}x`,
+    `Heavy files blocked: ${stats.heavyBlocked} (~${k(stats.heavyTokens)} tokens) · guard ${onOff(isOn('guard'))} · turned off ${stats.guardOffs}x`,
     `Blocks Claude insisted past (likely false blocks): ${Object.entries(stats.insisted).map(([g, n]) => `${g} ${n}`).join(' · ')}`,
     `PDFs pointed to Indra OCR: ${stats.pdfsToOcr} · ${status.indra === 'ok' ? 'indra installed' : 'indra not installed'}`,
     `Big code files shown as an outline first: ${stats.outlined} (~${k(stats.outlineTokens)} tokens) · outline first ${onOff(isOn('outlineFirst'))}`,
@@ -199,6 +278,8 @@ function statsText() {
     `Chong Li: ${stats.chongRuns} reviews, ${stats.chongFindings} findings`,
     `Mod suggestions: ${stats.suggestShown} shown, ${stats.suggestTaken} taken`,
     `Haiku calls: ${k(stats.haikuIn)} input tokens, ${k(stats.haikuOut)} output tokens`,
+    '',
+    historyText(),
   ].join('\n')
 }
 
@@ -218,7 +299,6 @@ async function heavySize($: EngineInterface, file: string): Promise<number | und
 }
 const HEAVY_WHAT = '(lockfile, dependency, build output, minified, or a big log or data dump)'
 const BULKY_HINT = ' For a log: `wc -l`, `tail -n`, grep the error. For CSV/SQL: the header with `head -n 5`, or query it (duckdb, sqlite3).'
-let isGuardOn = true
 
 // "Prove it works": code edited in a turn with no test/build/type-check after.
 const CODE_FILE = /\.(ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|kt|swift|c|h|cpp|cs|php|scala|sh|vue|svelte|gd|lua|ex|exs|dart)$/
@@ -335,6 +415,7 @@ async function checkEdited($: EngineInterface, file: string): Promise<string | u
     return undefined
   }
   stats.checkCatches += 1
+  flag('postEditCheck', `${file}: ${found.tool} errors handed back`, 'quiet')
   turnFailure ||= `${found.tool} errors in ${file}`
   // the same errors after another edit: a structural one, which retrying rarely fixes
   const sig = errorSig(found.errors)
@@ -417,12 +498,14 @@ const pdfRange = (pages: string): Range => {
   return [a!, b!]
 }
 const onceWarned = new Set<string>() // PDF and JSON redirects: once per agent and file; insisting goes through
-// A refused call that went through when asked again: counted once per refusal, for /van-code-stats.
+// A refused call that went through when asked again: counted once per refusal, for /van-code:stats.
 const insistedKeys = new Set<string>()
+const INSISTED_FEATURE = { read: 'readMemory', json: 'jq', pdf: 'pdf', outline: 'outlineFirst', infra: 'infraGuard', git: 'gitGuard' } as const
 function insisted(guard: keyof typeof stats.insisted, key: string) {
   if (insistedKeys.has(key)) return
   insistedKeys.add(key)
   stats.insisted[guard] += 1
+  wentPast(INSISTED_FEATURE[guard], key.slice(key.indexOf('|') + 1))
 }
 
 // Big code file: its outline first, so Claude reads only the function it needs. Once per agent and file.
@@ -441,6 +524,7 @@ async function outlineDeny($: EngineInterface, agentId: string | undefined, file
   onceWarned.add(`outline|${key}`)
   const shown = entries.join('\n')
   stats.outlined += 1
+  flag('outlineFirst', `${file}: outline shown instead of ${lines} lines`, 'quiet')
   stats.outlineTokens += Math.round((text.length - shown.length) / 4)
   return (
     `Jean-Claude Van Code: ${file} is ${lines} lines. Its outline (a range runs to the next declaration, so it may include code between them):\n${shown}\n` +
@@ -459,6 +543,7 @@ async function jsonDeny($: EngineInterface, agentId: string | undefined, file: s
   if (!st || st.size <= JSON_MAX) return undefined
   onceWarned.add(key)
   stats.jsonToJq += 1
+  flag('jq', `${file}: pointed to jq`, 'quiet')
   return (
     `Jean-Claude Van Code: ${file} is ${Math.round(st.size / 1000)} KB of JSON. Slice it with jq: \`jq keys\` for its shape, then \`jq '.path.to.what.you.need'\`. ` +
     'If you truly need it whole, run the same read again and it will go through.'
@@ -734,10 +819,12 @@ async function repeatDeny($: EngineInterface, agentId: string | undefined, file:
   }
   if (before.isWarned) {
     stats.insisted.read += 1 // remember() re-arms it, so each refusal counts once
+    wentPast('readMemory', file)
     return undefined
   }
   before.isWarned = true
   stats.readsSkipped += 1
+  flag('readMemory', `${file}: repeat read skipped`, 'quiet')
   stats.readTokens += Math.round(now.size / 4)
   return (
     `Jean-Claude Van Code: you already read ${file} (these lines) in this conversation and it has not changed since. ` +
@@ -784,6 +871,7 @@ async function deltaDeny($: EngineInterface, agentId: string | undefined, file: 
   // the same lines as before: a whole Read stops at 2,000 lines, so the rest stays unread
   reads.set(key, { mtimeMs: now.mtimeMs, size: now.size, ranges: before.ranges, isWarned: true, anchor: before.anchor, text })
   stats.deltaReads += 1
+  flag('readMemory', `${file}: answered with its diff`, 'quiet')
   stats.deltaTokens += Math.round((text.length - r.stdout.length) / 4)
   return (
     `Jean-Claude Van Code: ${file} changed since you read it whole. Only these lines differ (unified diff, your last read to now):\n${r.stdout}\n` +
@@ -843,7 +931,7 @@ async function suggestFollowUp($: EngineInterface, answer: string) {
   }
 }
 
-// Session start, no network: only when a scanned folder's manifests changed since /van-code-scan.
+// Session start, no network: only when a scanned folder's manifests changed since /van-code:scan.
 async function scanNotice($: EngineInterface) {
   try {
     const scanned = await findRoots($)
@@ -852,7 +940,7 @@ async function scanNotice($: EngineInterface) {
     const changed = changedRoots(cache.hashes, await manifestHashes(p => $.fs.read(p), scanned))
     if (changed.length === 0) return
     const names = changed.map(r => (r === scanned[0] ? '.' : r.slice(r.lastIndexOf('/') + 1)))
-    $.ui.toast(`Dependências novas em ${names.join(', ')}: rode /van-code-scan`)
+    $.ui.toast(`Dependências novas em ${names.join(', ')}: rode /van-code:scan`)
   } catch {} // a notice, never a reason for the session to fail
 }
 
@@ -862,27 +950,7 @@ export const register: Register = (on, opts) => {
     setCwd(e.cwd)
     await $.command.register({
       name: 'van-code',
-      description: 'Jean-Claude Van Code: play the flying kick again',
-    })
-    await $.command.register({
-      name: 'van-code-setup',
-      description: 'Jean-Claude Van Code: install the missing factory equipment',
-    })
-    await $.command.register({
-      name: 'van-code-guard',
-      description: 'Jean-Claude Van Code: turn the heavy-file guard off or on for this session',
-    })
-    await $.command.register({
-      name: 'van-code-stats',
-      description: 'Jean-Claude Van Code: what the mod saved and spent in this session',
-    })
-    await $.command.register({
-      name: 'van-code-scan',
-      description: 'Jean-Claude Van Code: find official skills, plugins and docs for AI agents for this stack (on demand, uses the network)',
-    })
-    await $.command.register({
-      name: 'chong-li',
-      description: 'Jean-Claude Van Code: Chong Li tries to break the latest code changes',
+      description: 'Jean-Claude Van Code: switches by group; on|off <feature>, profile <full|light|minimal>, intro',
     })
     await $.tool.register({
       name: 'affected_tests',
@@ -942,7 +1010,9 @@ export const register: Register = (on, opts) => {
     Object.assign(tokens, noTokens()) // /clear starts the session's figures over
     requestsDone = 0
     costDone = 0
-    isGuardOn = isOn('guard')
+    overrides.clear() // /van-code on|off and profile last until /clear
+    sessionProfile = undefined
+    history ??= prune(await $.store.get(HISTORY_KEY).catch(() => undefined), Date.now())
     frozen = undefined
     setCache(null)
     turnOutput = ''
@@ -970,7 +1040,7 @@ export const register: Register = (on, opts) => {
   })
 
   let scanItems: ScanItem[] = [] // the last scan's numbered list, for `install <n>`
-  on('command.run', { command: 'van-code-scan' }, async ($, e) => {
+  on('command.run', { command: 'van-code:scan' }, async ($, e) => {
     const [sub, ...rest] = e.args.split(/\s+/).filter(Boolean)
     if (sub !== 'install') {
       const scanned = roots.length > 0 ? roots : [cwd]
@@ -979,7 +1049,7 @@ export const register: Register = (on, opts) => {
       if (sub !== 'refresh' && cache && !isStale(cache) && changedRoots(cache.hashes, hashes).length === 0) {
         scanItems = cache.items
         const when = new Date(cache.at).toISOString().slice(0, 10)
-        return { text: `${cache.text}\n(saved scan from ${when}, no dependency changed since; /van-code-scan refresh asks again)`, isTextDisplayOnly: true }
+        return { text: `${cache.text}\n(saved scan from ${when}, no dependency changed since; /van-code:scan refresh asks again)`, isTextDisplayOnly: true }
       }
       $.ui.toast('Scanning the stack: dependencies, then GitHub and the docs sites...')
       const scan = await stackScan($, scanned)
@@ -989,7 +1059,7 @@ export const register: Register = (on, opts) => {
     }
     const picked = rest.map(n => scanItems[Number(n) - 1])
     if (rest.length === 0 || picked.some(p => !p))
-      return { text: scanItems.length === 0 ? 'Run /van-code-scan first.' : `Pick numbers from 1 to ${scanItems.length}: /van-code-scan install 1 3`, isTextDisplayOnly: true }
+      return { text: scanItems.length === 0 ? 'Run /van-code:scan first.' : `Pick numbers from 1 to ${scanItems.length}: /van-code:scan install 1 3`, isTextDisplayOnly: true }
     const lines: string[] = []
     for (const item of picked as ScanItem[]) {
       $.ui.toast(`Instalando ${item.name}...`)
@@ -1012,33 +1082,27 @@ export const register: Register = (on, opts) => {
     return { text: lines.join('\n'), isTextDisplayOnly: true }
   })
 
-  on('command.run', { command: 'van-code-stats' }, () => ({ text: statsText(), isTextDisplayOnly: true }))
+  on('command.run', { command: 'van-code:stats' }, () => ({ text: statsText(), isTextDisplayOnly: true }))
+  on('command.run', { command: 'van-code:log' }, () => ({ text: logText(), isTextDisplayOnly: true }))
 
-  on('command.run', { command: 'van-code-guard' }, () => {
-    isGuardOn = !isGuardOn
-    if (!isGuardOn) stats.guardOffs += 1
-    return {
-      text: isGuardOn
-        ? 'Guard on: heavy files only in slices.'
-        : 'Guard off for this session: Claude may read any file whole.',
-      isTextDisplayOnly: true,
-    }
-  })
+  // The old toggle, kept: the guard's refusal names it.
+  on('command.run', { command: 'van-code:guard' }, () => ({ text: setSwitch('guard', !isOn('guard')), isTextDisplayOnly: true }))
 
   // Heavy files only in slices, unless the person turned the guard off.
   on('tool.call', { tool: 'Read' }, async ($, e, next) => {
     const isSlice = e.limit !== undefined && e.limit <= SLICE_MAX
-    const heavySz = isGuardOn && !isSlice ? await heavySize($, e.file_path) : undefined
+    const heavySz = isOn('guard') && !isSlice ? await heavySize($, e.file_path) : undefined
     if (heavySz !== undefined) {
       stats.heavyBlocked += 1
       stats.heavyTokens += Math.round(heavySz / 4)
+      flag('guard', `${e.file_path}: heavy file, sliced only`, 'quiet')
       return {
         deny:
           `Jean-Claude Van Code: ${e.file_path} is a heavy file ${HEAVY_WHAT}. ` +
           `Use Grep to find what you need, or Read it with offset/limit (limit up to ${SLICE_MAX}).` +
           (BULKY.test(e.file_path) ? BULKY_HINT : '') +
           ' ' +
-          'If the whole file is truly needed, ask the user to run /van-code-guard.',
+          'If the whole file is truly needed, ask the user to run /van-code:guard.',
       }
     }
     const pdfKey = readKey(e.agentId, e.file_path)
@@ -1046,6 +1110,7 @@ export const register: Register = (on, opts) => {
     if (status.indra === 'ok' && /\.pdf$/i.test(e.file_path) && pdfPages(e.pages) >= OCR_MIN_PAGES && !onceWarned.has(pdfKey)) {
       onceWarned.add(pdfKey)
       stats.pdfsToOcr += 1
+      flag('pdf', `${e.file_path}: pointed to indra-ocr`, 'quiet')
       return {
         deny:
           `Jean-Claude Van Code: ${e.file_path} is cheaper as text. Run \`indra-ocr '${e.file_path}' --out <a temp folder>\` ` +
@@ -1084,7 +1149,7 @@ export const register: Register = (on, opts) => {
     const files = parsed.reads.map(r => ({ ...r, path: resolvePath(cwd, parsed.dir, r.file) }))
     let heavy: (typeof files)[number] | undefined
     let heavySz = 0
-    for (const r of isGuardOn ? files : []) {
+    for (const r of isOn('guard') ? files : []) {
       const sz = r.lines === undefined || r.lines > SLICE_MAX ? await heavySize($, r.path) : undefined
       if (sz !== undefined) {
         heavy = r
@@ -1095,13 +1160,14 @@ export const register: Register = (on, opts) => {
     if (heavy) {
       stats.heavyBlocked += 1
       stats.heavyTokens += Math.round(heavySz / 4)
+      flag('guard', `${heavy.file}: heavy file, sliced only`, 'quiet')
       return {
         deny:
           `Jean-Claude Van Code: ${heavy.file} is a heavy file ${HEAVY_WHAT}. ` +
           `Use grep, or print a slice with head -n or sed -n 'A,Bp' (up to ${SLICE_MAX} lines).` +
           (BULKY.test(heavy.path) ? BULKY_HINT : '') +
           ' ' +
-          'If the whole file is truly needed, ask the user to run /van-code-guard.',
+          'If the whole file is truly needed, ask the user to run /van-code:guard.',
       }
     }
     // the memory only for one file with known lines (not tail, not git show)
@@ -1130,6 +1196,7 @@ export const register: Register = (on, opts) => {
       onceWarned.add(key)
       stats.infraBlocked += 1
       $.ui.toast(`Infra ${held.kind} held: Claude was told to preview it first`)
+      flag('infraGuard', `${held.kind} held for a preview: ${e.command.trim().slice(0, 80)}`, 'urgent')
       return {
         deny:
           `Jean-Claude Van Code: this ${held.kind === 'destroy' ? 'deletes' : 'changes'} live infrastructure (${held.family}). ` +
@@ -1168,6 +1235,7 @@ export const register: Register = (on, opts) => {
     onceWarned.add(key)
     stats.gitBlocked += 1
     $.ui.toast(`Git ${found.kind === 'force' ? 'force push' : 'discard'} held: Claude was told to check first`)
+    flag('gitGuard', `${found.kind === 'force' ? 'force push' : 'discard'} held: ${e.command.trim().slice(0, 80)}`, 'urgent')
     const files = dirty.split('\n').slice(0, 15).join('\n')
     return {
       deny:
@@ -1195,7 +1263,7 @@ export const register: Register = (on, opts) => {
     if (!isOn('noAttribution')) return next(e)
     const line = findAttribution(e.command)
     if (!line) return next(e)
-    $.ui.toast('AI attribution removed from a commit or PR')
+    flag('noAttribution', `"${line}" refused in a commit or PR`)
     return {
       deny:
         `Jean-Claude Van Code: the user never wants AI attribution. Remove "${line}" (and any other AI co-author, ` +
@@ -1223,7 +1291,10 @@ export const register: Register = (on, opts) => {
     // precompute keeps a summary for later; the real compaction fires again
     if (isMain && e.trigger !== 'precompute') {
       restore = restoreText()
-      if (restore) stats.restores += 1
+      if (restore) {
+        stats.restores += 1
+        flag('compactRestore', 'your messages and the ledger put back after a compaction', 'quiet')
+      }
     }
     return r
   })
@@ -1242,7 +1313,7 @@ export const register: Register = (on, opts) => {
     if (fixes.length > 0 && !ran.isError) {
       for (const f of fixes) archaeologySeen.add(`${edited}|${f.hash}`)
       stats.archaeology += 1
-      $.ui.toast(`Archaeology: this edit removed lines from a fix (${fixes[0]!.summary.slice(0, 60)})`)
+      flag('archaeology', `${edited}: removed lines from fix ${fixes[0]!.hash} "${fixes[0]!.summary.slice(0, 60)}"`)
       ran = { ...ran, context: [...(ran.context ?? []), archaeologyNote(edited, fixes)] }
     }
     // an auto-compaction mid-turn: the restore rides on the next tool result, not a turn later
@@ -1269,7 +1340,7 @@ export const register: Register = (on, opts) => {
         failing.set(who, grown)
         if (grown.length === LOOP_FAILS) {
           stats.loopsCaught += 1
-          $.ui.toast(`${LOOP_FAILS} related commands failed in a row: Claude was told to change course`)
+          flag('loop', `${LOOP_FAILS} related commands failed in a row: ${command.slice(0, 80)}`)
           return { ...ran, context: [...(ran.context ?? []), loopNote(grown)] }
         }
       }
@@ -1299,7 +1370,7 @@ export const register: Register = (on, opts) => {
       const found = findCheats(e.file_path, before, after)
       if (found.length > 0) {
         stats.cheatsFlagged += 1
-        $.ui.toast(`Anti-cheat: ${e.file_path.slice(e.file_path.lastIndexOf('/') + 1)} got ${found[0]} after a failure`)
+        flag('antiCheat', `${e.file_path}: ${found[0]} after ${turnFailure}`)
         ran = { ...ran, context: [...(ran.context ?? []), cheatNote(e.file_path, found, turnFailure)] }
       }
     }
@@ -1313,14 +1384,14 @@ export const register: Register = (on, opts) => {
       const unnamed = added.filter(d => !isNamed(d, recentAsks()))
       if (unnamed.length > 0) {
         stats.depsUnasked += unnamed.length
-        $.ui.toast(`Intent diff: ${unnamed.join(', ')} added, the request never named it`)
+        flag('intentDiff', `${unnamed.join(', ')} added, the request never named it`)
         ran = { ...ran, context: [...(ran.context ?? []), depNote(unnamed, e.tool === 'Bash' ? 'this command' : `this edit of ${e.file_path}`)] }
       }
     }
     if (isOn('intentDiff') && !ran.isError && (e.tool === 'Edit' || e.tool === 'Write') && CONFIG.test(e.file_path) && !configTold.has(e.file_path) && !isConfigNamed(e.file_path, recentAsks())) {
       configTold.add(e.file_path)
       stats.configUnasked += 1
-      $.ui.toast(`Intent diff: config ${e.file_path.slice(e.file_path.lastIndexOf('/') + 1)} edited, the request never named it`)
+      flag('intentDiff', `config ${e.file_path} edited, the request never named it`)
       ran = { ...ran, context: [...(ran.context ?? []), configNote(e.file_path)] }
     }
     if (isMigrationWatch && !ran.isError && (e.tool === 'Edit' || e.tool === 'Write')) {
@@ -1332,7 +1403,7 @@ export const register: Register = (on, opts) => {
       if (risks.length > 0) {
         for (const r of risks) toldOnce.add(`${e.file_path}|${r}`)
         stats.migrationRisks += risks.length
-        $.ui.toast(`Migration gate: ${risks.length} statement(s) can lock or break a live table`)
+        flag('migrationGate', `${e.file_path}: ${risks.length} statement(s) can lock or break a live table`)
         ran = { ...ran, context: [...(ran.context ?? []), migrationNote(e.file_path, risks)] }
       }
     }
@@ -1345,7 +1416,7 @@ export const register: Register = (on, opts) => {
       if (breaks.length > 0) {
         for (const b of breaks) toldOnce.add(`${file}|${b}`)
         stats.schemaBreaks += breaks.length
-        $.ui.toast(`Schema guard: ${breaks[0]}`)
+        flag('schemaGuard', `${file}: ${breaks[0]}`)
         ran = { ...ran, context: [...(ran.context ?? []), schemaNote(file, breaks)] }
       }
     }
@@ -1380,7 +1451,7 @@ export const register: Register = (on, opts) => {
     return ran
   })
 
-  on('command.run', { command: 'chong-li' }, async $ => {
+  on('command.run', { command: 'van-code:chong-li' }, async $ => {
     if (isReviewing) return { text: 'Chong Li is already reviewing, hold on.', isTextDisplayOnly: true }
     let diff = takeUnreviewed()
     if (!diff) {
@@ -1400,34 +1471,36 @@ export const register: Register = (on, opts) => {
   // Automatic Chong Li review: only a big or risky change, never a chat turn.
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId) setWorking(false)
+    // the reviews below finish after the turn: the turn's one toast waits for them
+    const work: Promise<unknown>[] = []
     if (isOn('chongLi') && !e.agentId && unreviewed.length > 0 && (turnLines >= BIG_CHANGE || isTurnRisky) && !isReviewing) {
       const diff = takeUnreviewed()
-      void chongLi($, diff).then(found => {
+      work.push(chongLi($, diff).then(found => {
         if (!found) return
-        $.ui.toast(`Chong Li found a way to break it: ${found.split('\n')[0]}`)
+        flag('chongLi', found.split('\n')[0]!)
         notes.push(
           `[Jean-Claude Van Code / Chong Li] A cheap adversarial review of your last code changes (it saw only the diff, so it may be wrong) claims:\n${found}\nCheck whether this scenario really fails. Fix it if it is real, and tell the user either way in one line.`,
         )
-      })
+      }))
     }
     if (isOn('intentDiff') && !e.agentId && turnLines >= BIG_CHANGE && recentAsks()) {
       const diff = turnDiff.join('\n\n')
-      void intentCheck($, recentAsks(), diff).then(found => {
+      work.push(intentCheck($, recentAsks(), diff).then(found => {
         if (!found) return
-        $.ui.toast(`Intent diff: ${found.split('\n')[0]}`)
+        flag('intentDiff', found.split('\n')[0]!)
         notes.push(
           `[Jean-Claude Van Code] Intent diff: a cheap check of your last changes against the user's request (it saw only the changes, so it may be wrong) says:\n${found}\nFor each Unasked item, remove it unless the user wants it; for each Missing one, do it or say why not. Tell the user in one line either way.`,
         )
-      }).catch(() => {})
+      }).catch(() => {}))
     }
     if (isOn('cleanRoom') && !e.agentId && turnAdded.size > 0) {
       const added = turnAdded
-      void cleanRoom($, added).then(items => {
+      work.push(cleanRoom($, added).then(items => {
         if (items.length === 0) return
         stats.cleanRoom += items.length
-        $.ui.toast(`Clean-room: ${items[0]}`)
+        for (const i of items) flag('cleanRoom', i)
         notes.push(cleanRoomNote(items))
-      }).catch(() => {})
+      }).catch(() => {}))
     }
     if (!e.agentId) {
       turnAdded = new Map()
@@ -1445,12 +1518,12 @@ export const register: Register = (on, opts) => {
       ranTests = []
       const nag = () => {
         notes.push(NOTE)
-        $.ui.toast('Code edited with no test or build run: Claude will be asked to verify next turn')
+        flag('proveIt', 'code edited with no test or build run')
       }
       // the test search can take seconds on a big repo: the note joins when it is done
       if (!touched.length) nag()
       else
-        void (async () => {
+        work.push((async () => {
           const isAllClean = touched.every(f => syntaxClean.has(f))
           // nothing ran and no clean check: no search needed to know it is unproven
           const isUnproven = ran.length === 0 && !isAllClean
@@ -1466,22 +1539,23 @@ export const register: Register = (on, opts) => {
             notes.push(
               `[Jean-Claude Van Code] In the previous turn you edited code and ran only ${ran.join(', ')}, which ${ran.length > 1 ? 'do' : 'does'} not import the files you changed, so ${ran.length > 1 ? 'they prove' : 'it proves'} nothing about the change. Run the tests that reach it, and say what you ran.`,
             )
-            $.ui.toast('The tests Claude ran do not reach the edited code: it will be asked to run the right ones')
+            flag('proveIt', `ran ${ran.join(', ')}, which do not reach the edited code`)
           } else nag()
           notes.push(await testsText($, touched, groups))
-        })().catch(nag)
+        })().catch(nag))
     }
     if (isOn('proveIt') && !e.agentId && hasWeb && !ranBrowser) {
       const fresh = [...turnUi].filter(f => !uiAsked.has(f))
       if (fresh.length > 0 && status.playwright === 'ok') {
         for (const f of fresh) uiAsked.add(f)
         stats.uiSuggested += 1
+        flag('proveIt', `UI change with no browser check: ${fresh.join(', ')}`, 'quiet')
         notes.push(
           `[Jean-Claude Van Code] In the previous turn you changed user-facing code (${fresh.join(', ')}) and no browser saw it. If the change alters what a user sees or does, run the app and walk through that flow with playwright-cli as a user would, then say what you saw; if it does not, say so in one line.`,
         )
       } else if (fresh.length > 0 && status.playwright === 'missing' && !isPlaywrightOffered) {
         isPlaywrightOffered = true
-        $.ui.toast('UI change with no browser check: /van-code-setup playwright lets Claude test it like a user')
+        $.ui.toast('UI change with no browser check: /van-code:setup playwright lets Claude test it like a user')
       }
     }
     if (!e.agentId) {
@@ -1509,7 +1583,7 @@ export const register: Register = (on, opts) => {
     const open = ledger.filter(a => a.state === 'open')
     const unreached = targets.filter(t => t.state === 'open')
     if (!e.agentId && (open.length > 0 || unreached.length > 0) && 'answer' in e && DONE_CLAIM.test(e.answer)) {
-      $.ui.toast(`Claimed done with ${open.length} unverified assumption(s), ${unreached.length} target(s) not reached`)
+      flag('ledger', `claimed done with ${open.length} unverified assumption(s), ${unreached.length} target(s) not reached`)
       notes.push(
         [
           '[Jean-Claude Van Code] Your last answer claimed the work was done while',
@@ -1534,11 +1608,21 @@ export const register: Register = (on, opts) => {
       const bad = isOn('receipts') ? checkReceipts(e.answer, turnOutput, seenHashes) : []
       if (bad.length > 0) {
         stats.receiptsFlagged += bad.length
-        $.ui.toast(`Receipts: ${bad.length} claim(s) in the last answer don't match the tool output`)
+        for (const b of bad) flag('receipts', b)
         notes.push(`[Jean-Claude Van Code] Receipts: your last answer claimed ${bad.join('; ')}. Correct it for the user in one line.`)
       }
       turnOutput = ''
     }
+    if (!e.agentId)
+      void Promise.allSettled(work).then(() => {
+        const text = turnSummary(turnFlags, notes.length)
+        turnFlags = []
+        if (text) $.ui.toast(text)
+        if (history && isHistoryDirty) {
+          isHistoryDirty = false
+          void $.store.set(HISTORY_KEY, history).catch(() => {})
+        }
+      })
     void refreshStatus($)
     return next(e)
   })
@@ -1599,10 +1683,28 @@ export const register: Register = (on, opts) => {
     return { ...r, sections: [...r.sections, ...(await frozen)] }
   })
 
-  on('command.run', { command: 'van-code' }, $ => {
-    play($)
+  on('command.run', { command: 'van-code' }, ($, e) => {
+    const [sub = '', ...rest] = e.args.trim().split(/\s+/).filter(Boolean)
+    const arg = rest.join(' ')
+    const say = (text: string) => ({ text, isTextDisplayOnly: true as const })
+    if (sub === 'intro') {
+      play($)
+      void checkAll($)
+      return say('Hi-yah!')
+    }
+    if (sub === 'on' || sub === 'off') {
+      const key = findSwitch(arg)
+      if (!key) return say(`No switch named "${arg}". Names: ${GROUPS.flatMap(([, s]) => s.map(x => x.key)).join(', ')}`)
+      return say(setSwitch(key, sub === 'on'))
+    }
+    if (sub === 'profile') {
+      if (!PROFILES[arg]) return say(`Profiles: ${Object.keys(PROFILES).join(', ')}. Now: ${profileOf()}.`)
+      sessionProfile = arg
+      frozen = undefined // rules and ADHD mode ride in the system prompt
+      return say(`Profile ${arg} for this session${PROFILES[arg]!.length ? `: off ${PROFILES[arg]!.map(titleOf).join(', ')}` : ': everything your /config has on'}. To keep it: profile in /config.\n\n${switchesText()}`)
+    }
     void checkAll($)
-    return { text: 'Hi-yah!', isTextDisplayOnly: true }
+    return say(switchesText())
   })
 
   // Any slash command, the mod's or not: remembered so it is not suggested again.
@@ -1612,7 +1714,7 @@ export const register: Register = (on, opts) => {
   })
 
   // No args: every recommended item missing. Args: those items, optional ones included.
-  on('command.run', { command: 'van-code-setup' }, async ($, e) => {
+  on('command.run', { command: 'van-code:setup' }, async ($, e) => {
     if (isInstalling) return { text: 'Already installing, hold on.', isTextDisplayOnly: true }
     const asked = e.args.split(/\s+/).filter(Boolean)
     const unknown = asked.filter(a => !RECS.some(r => r.id === a))
@@ -1659,7 +1761,7 @@ export const register: Register = (on, opts) => {
     if (kind) {
       notes.push(cardNote(kind, status.playwright === 'ok', status['diagnosing-bugs'] === 'ok'))
       stats.cards += 1
-      $.ui.toast(`Read as a ${kind === 'task' ? 'task card' : kind === 'bug' ? 'bug report' : 'user story'}: Claude will plan it before coding`)
+      flag('cardPlan', `read as a ${kind === 'task' ? 'task card' : kind === 'bug' ? 'bug report' : 'user story'}: planned before coding`)
     }
     if (e.text.trim()) asks.push(e.text.trim())
     if (restore) {
@@ -1821,7 +1923,7 @@ export const register: Register = (on, opts) => {
               : r.id === 'infra' && st === 'none' ? 'no Terraform, Helm or Kubernetes files in this repo'
               : r.id === 'playwright' && st === 'none' ? 'no web frontend in this folder'
               : r.desc
-            const tail = isOffer ? ` · optional: /van-code-setup ${r.id}` : st === 'missing' ? ' (missing)' : ''
+            const tail = isOffer ? ` · optional: /van-code:setup ${r.id}` : st === 'missing' ? ' (missing)' : ''
             return (
               <Text key={`rec-${r.id}`} wrap="truncate">
                 <Text key="m" color={color}>{` ${mark} ${r.id.padEnd(18)}`}</Text>
@@ -1834,7 +1936,7 @@ export const register: Register = (on, opts) => {
           ...(isMissing
             ? [
                 <Text key="hint" color="#F5C542">
-                  {isInstalling ? ' installing...' : ' → run /van-code-setup to install what is missing'}
+                  {isInstalling ? ' installing...' : ' → run /van-code:setup to install what is missing'}
                 </Text>,
               ]
             : []),

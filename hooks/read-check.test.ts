@@ -36,7 +36,7 @@ test('a big log is heavy, a small one reads whole, and insisting past a refusal 
   expect((await $.tool.call({ tool: 'Read', file_path: '/p/small.log' })).deny).toBeUndefined()
   await $.tool.call({ tool: 'Read', file_path: '/p/small.log' }) // refused as a repeat
   await $.tool.call({ tool: 'Read', file_path: '/p/small.log' }) // insisted
-  const r = await $.command.run({ command: 'van-code-stats', args: '' } as never)
+  const r = await $.command.run({ command: 'van-code:stats', args: '' } as never)
   expect(String(r.text)).toContain("read 1 ·")
 })
 
