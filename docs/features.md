@@ -101,7 +101,7 @@ Installing needs Homebrew (for `rtk` and some language servers), `npm` (for the 
 - **`/van-code:log`**: the last 20 times the mod stepped in, with the time, the behavior and the file, command or claim, including each time Claude ran a refused call again. A finding fixed by removing what it flagged (anti-cheat, a migration statement, a clean-room debug leftover, raw log, scale trap or local URL) ends `→ fixed` once an edit removes those lines, or `→ kept` when they are still there a full turn after Claude was told (fixed another way, or explained). `/van-code:stats` counts both over 30 days.
 - **`/van-code reset`** undoes this session's `on`, `off` and `profile`, back to what `/config` has.
 - **One toast per turn.** Findings collect during the turn and show as one toast when it ends, with how many notes Claude reads with your next message (Chong Li, intent diff, clean-room and "prove it" land then). Infra and git holds still toast at once. Read savings (repeat reads, outlines, diffs, heavy files) only go to the log and the counts.
-- **30 days of counts.** `/van-code:stats` adds what each behavior did over the last 30 days, across sessions, and names a switch Claude went past at least half of the times it fired (5 or more), as a likely false block in this setup.
+- **30 days of counts.** `/van-code:stats` adds what each behavior did over the last 30 days, across sessions, and names a switch Claude went past at least half of the times it fired (5 or more), as a likely false block in this setup. The counts are saved at the end of each turn, and the session's log and scoreboard come back after `/reload-plugins`.
 - **`/van-code intro`** replays the flying kick.
 
 ## Settings

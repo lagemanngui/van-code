@@ -19,7 +19,7 @@ import { isCovered, parseShellRead, type Range, READ_DEFAULT_LINES, readRange, r
 import { checkAll, cwd, findRoots, hasWeb, infra, install, isLacking, langs, RECS, roots, run, setCwd, status } from './factory.js'
 import { type Cell, cells, LAST, MAX_W, MIN_W, pixels } from './intro.js'
 import { type Changed, type Finding, fileFindings, isImportedBy, parseRemotePr, reviewAsk, reviewText, slugOf, tierOf } from './review.js'
-import { bump, findSwitch, GROUPS, type History, offHints, PROFILES, prune, titleOf, totals, turnSummary } from './switches.js'
+import { bump, findSwitch, GROUPS, type History, merge, offHints, PROFILES, prune, titleOf, totals, turnSummary } from './switches.js'
 import {
   animateUsage,
   bar,
@@ -83,17 +83,19 @@ const LOG_MAX = 20
 const flagLog: Flag[] = []
 let turnFlags: string[] = []
 const fired: Record<string, number> = {} // this session, by behavior
-let history: History | undefined // loaded once from $.store
-let isHistoryDirty = false
+// Counts since the last save: merged into the stored history at each turn's end, never held back
+// until a session.start (a hot reload has none).
+let unsaved: History = {}
 const HISTORY_KEY = 'history'
+const SESSION_KEY = 'session' // this session's log and scoreboard, put back after a reload
+const count = (key: string) => bump(unsaved, Date.now(), key)
 // `toast`: in the turn's summary; `urgent`: the caller toasts it now; `quiet`: log and counts only (read savings).
 function flag(feature: string, text: string, how: 'toast' | 'urgent' | 'quiet' = 'toast', watch?: { file: string; lines: string[]; turn?: number }) {
   const w = watch && watch.lines.length > 0 ? { file: watch.file, lines: watch.lines.map(l => l.trim()), turn: watch.turn ?? turnNo } : undefined
   flagLog.push({ at: Date.now(), feature, text, ...(w ? { watch: w } : {}) })
   if (flagLog.length > LOG_MAX) flagLog.shift()
   fired[feature] = (fired[feature] ?? 0) + 1
-  if (history) bump(history, Date.now(), feature)
-  isHistoryDirty = true
+  count(feature)
   if (how === 'toast') turnFlags.push(feature)
 }
 // An edit of a watched file: a finding whose lines are all gone was fixed.
@@ -107,8 +109,7 @@ async function markFixed($: EngineInterface, file: string) {
   for (const f of open)
     if (!f.watch!.lines.some(l => now.has(l))) {
       f.outcome = 'fixed'
-      if (history) bump(history, Date.now(), `${f.feature}.fixed`)
-      isHistoryDirty = true
+      count(`${f.feature}.fixed`)
     }
 }
 // A turn has passed since the finding reached Claude and the lines are still there: kept (fixed another way, or explained).
@@ -116,16 +117,14 @@ function closeKept() {
   for (const f of flagLog)
     if (f.watch && !f.outcome && f.watch.turn < turnNo) {
       f.outcome = 'kept'
-      if (history) bump(history, Date.now(), `${f.feature}.kept`)
-      isHistoryDirty = true
+      count(`${f.feature}.kept`)
     }
 }
 // Claude ran the refused call again: the block was likely wrong here.
 function wentPast(feature: string, what: string) {
   flagLog.push({ at: Date.now(), feature, text: `Claude went past it: ${what}` })
   if (flagLog.length > LOG_MAX) flagLog.shift()
-  if (history) bump(history, Date.now(), `${feature}.past`)
-  isHistoryDirty = true
+  count(`${feature}.past`)
 }
 
 // The session's scoreboard for /van-code:stats. Token figures are estimates (bytes / 4).
@@ -265,8 +264,44 @@ const outcomes = (t: Record<string, number>, k: string) => {
   const parts = [t[`${k}.past`] && `went past ${t[`${k}.past`]}`, t[`${k}.fixed`] && `fixed ${t[`${k}.fixed`]}`, t[`${k}.kept`] && `kept ${t[`${k}.kept`]}`].filter(Boolean)
   return parts.length ? ` (${parts.join(', ')})` : ''
 }
-function historyText(): string {
-  const t = totals(history ?? {})
+// The stored history with what this session has not saved yet.
+const historyNow = async ($: EngineInterface) => merge(prune(await $.store.get(HISTORY_KEY).catch(() => undefined), Date.now()), unsaved)
+
+// Saved at each turn's end: the stored history re-read and added to, so two sessions at once both count.
+async function saveAll($: EngineInterface) {
+  await restoreSession($) // a turn ending right after a reload must not save over the snapshot before reading it
+  const transcript = (await $.session.info().catch(() => undefined))?.transcriptPath
+  if (transcript) await $.store.set(SESSION_KEY, { transcript, log: flagLog, fired, stats } satisfies SessionSnapshot).catch(() => {})
+  if (Object.keys(unsaved).length === 0) return
+  const add = unsaved
+  unsaved = {}
+  const stored = prune(await $.store.get(HISTORY_KEY).catch(() => undefined), Date.now())
+  // a failed write keeps the counts for the next turn
+  await $.store.set(HISTORY_KEY, merge(stored, add)).catch(() => (unsaved = merge(unsaved, add)))
+}
+
+// After a hot reload the module starts empty: the same session's log and scoreboard come back from the store.
+type SessionSnapshot = { transcript: string; log: Flag[]; fired: Record<string, number>; stats: typeof stats }
+let isRestored = false
+async function restoreSession($: EngineInterface) {
+  if (isRestored) return
+  isRestored = true
+  const transcript = (await $.session.info().catch(() => undefined))?.transcriptPath
+  const s = (await $.store.get(SESSION_KEY).catch(() => undefined)) as SessionSnapshot | undefined
+  if (!transcript || s?.transcript !== transcript) return
+  const room = LOG_MAX - flagLog.length
+  if (room > 0) flagLog.unshift(...s.log.slice(-room)) // slice(-0) would take them all
+  for (const [k, n] of Object.entries(s.fired)) fired[k] = (fired[k] ?? 0) + n
+  const now = stats as unknown as Record<string, number | Record<string, number>>
+  for (const [k, v] of Object.entries(s.stats as unknown as Record<string, number | Record<string, number>>)) {
+    const cur = now[k]
+    if (typeof v === 'number' && typeof cur === 'number') now[k] = cur + v
+    else if (typeof v === 'object' && cur && typeof cur === 'object') for (const [g, n] of Object.entries(v)) cur[g] = (cur[g] ?? 0) + n
+  }
+}
+
+function historyText(h: History): string {
+  const t = totals(h)
   const top = Object.entries(t).filter(([k]) => !/\.(past|fixed|kept)$/.test(k)).sort((a, b) => b[1] - a[1])
   if (top.length === 0) return 'Last 30 days: nothing recorded yet'
   return [
@@ -275,7 +310,7 @@ function historyText(): string {
   ].join('\n')
 }
 
-function statsText() {
+function statsText(h: History) {
   return [
     'Jean-Claude Van Code · session scoreboard (token figures are estimates)',
     `Repeat reads skipped: ${stats.readsSkipped} (~${k(stats.readTokens)} tokens) · read memory ${onOff(isOn('readMemory'))}`,
@@ -311,7 +346,7 @@ function statsText() {
     `Mod suggestions: ${stats.suggestShown} shown, ${stats.suggestTaken} taken`,
     `Haiku calls: ${k(stats.haikuIn)} input tokens, ${k(stats.haikuOut)} output tokens`,
     '',
-    historyText(),
+    historyText(h),
   ].join('\n')
 }
 
@@ -1200,7 +1235,7 @@ export const register: Register = (on, opts) => {
     overrides.clear() // /van-code on|off and profile last until /clear
     checkpointAt = 0
     sessionProfile = undefined
-    history ??= prune(await $.store.get(HISTORY_KEY).catch(() => undefined), Date.now())
+    await restoreSession($)
     frozen = undefined
     setCache(null)
     turnOutput = ''
@@ -1270,7 +1305,10 @@ export const register: Register = (on, opts) => {
     return { text: lines.join('\n'), isTextDisplayOnly: true }
   })
 
-  on('command.run', { command: 'van-code:stats' }, () => ({ text: statsText(), isTextDisplayOnly: true }))
+  on('command.run', { command: 'van-code:stats' }, async $ => {
+    await restoreSession($)
+    return { text: statsText(await historyNow($)), isTextDisplayOnly: true }
+  })
   // Shown to the person only. With --claude the review reaches Claude as the command's output, and a turn starts
   // to check it (a command's output alone starts none); the ask rides in that turn's one short message.
   on('command.run', { command: 'van-code:review' }, async ($, e) => {
@@ -1284,7 +1322,10 @@ export const register: Register = (on, opts) => {
     $.clock.after(300, () => void $.prompt.submit({ text: ask }).catch(() => $.ui.toast('Could not start Claude on the review: send any message and it reads it')))
     return { text: r.text.replace(footer, 'Claude is checking the drafts now.') }
   })
-  on('command.run', { command: 'van-code:log' }, () => ({ text: logText(), isTextDisplayOnly: true }))
+  on('command.run', { command: 'van-code:log' }, async $ => {
+    await restoreSession($)
+    return { text: logText(), isTextDisplayOnly: true }
+  })
 
   // The old toggle, kept: the guard's refusal names it.
   on('command.run', { command: 'van-code:guard' }, () => ({ text: setSwitch('guard', !isOn('guard')), isTextDisplayOnly: true }))
@@ -1834,10 +1875,7 @@ export const register: Register = (on, opts) => {
         const text = turnSummary(turnFlags, notes.length)
         turnFlags = []
         if (text) $.ui.toast(text)
-        if (history && isHistoryDirty) {
-          isHistoryDirty = false
-          void $.store.set(HISTORY_KEY, history).catch(() => {})
-        }
+        void saveAll($)
       })
     void refreshStatus($)
     return next(e)
@@ -1899,7 +1937,8 @@ export const register: Register = (on, opts) => {
     return { ...r, sections: [...r.sections, ...(await frozen)] }
   })
 
-  on('command.run', { command: 'van-code' }, ($, e) => {
+  on('command.run', { command: 'van-code' }, async ($, e) => {
+    await restoreSession($)
     const [sub = '', ...rest] = e.args.trim().split(/\s+/).filter(Boolean)
     const arg = rest.join(' ')
     const say = (text: string) => ({ text, isTextDisplayOnly: true as const })
@@ -1976,6 +2015,7 @@ export const register: Register = (on, opts) => {
 
   // The checklist leaves once the person starts working.
   on('prompt.submit', ($, e, next) => {
+    void restoreSession($)
     setWorking(true)
     if (isOn('usageHeader')) animateUsage($)
     lastUserText = e.text

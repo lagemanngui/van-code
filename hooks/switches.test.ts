@@ -1,6 +1,6 @@
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
-import { bump, findSwitch, offHints, prune, totals, turnSummary } from './switches.js'
+import { bump, findSwitch, merge, offHints, prune, totals, turnSummary } from './switches.js'
 
 test('a switch is found by key, title or a unique prefix', () => {
   expect(findSwitch('anti-cheat')).toBe('antiCheat')
@@ -119,4 +119,49 @@ test('/van-code reset undoes the session changes', async ($, on) => {
   const r = await $.command.run({ command: 'van-code', args: 'reset' } as never)
   expect(String(r.text)).toContain('Back to /config (undid Anti-cheat off, profile minimal)')
   expect(String(r.text)).toMatch(/✓ Anti-cheat/)
+})
+
+test('two histories add up day by day', () => {
+  expect(merge({ d1: { a: 1 } }, { d1: { a: 2, b: 1 }, d2: { a: 1 } })).toEqual({ d1: { a: 3, b: 1 }, d2: { a: 1 } })
+})
+
+// A store and a transcript, as the engine keeps them across /reload-plugins (which fires no session.start).
+function stored(on: On, transcript: string, seed: Record<string, unknown> = {}) {
+  const store = new Map(Object.entries(seed))
+  on('store.get', (_, e) => ({ value: store.get((e as { key: string }).key) }) as never)
+  on('store.set', (_, e) => {
+    store.set((e as { key: string }).key, (e as { value: unknown }).value)
+    return { value: undefined } as never
+  })
+  on('session.info', () => ({ value: { transcriptPath: transcript } }) as never)
+  return store
+}
+
+test('counts reach the 30-day history and the log is saved, with no session.start', async ($, on) => {
+  world(on)
+  const store = stored(on, '/t/a.jsonl')
+  await $.prompt.submit({ text: 'fix the tests' } as never)
+  for (let i = 0; i < 3; i++) await $.tool.call(loop(i))
+  await $.turn.complete({ answer: 'still failing' } as never)
+  for (let i = 0; i < 500 && !store.has('history'); i++) await Promise.resolve() // the save runs after the turn's checks settle
+  expect(JSON.stringify(store.get('history'))).toContain('"loop"')
+  expect(JSON.stringify(store.get('session'))).toContain('/t/a.jsonl')
+  const r = await $.command.run({ command: 'van-code:stats', args: '' } as never)
+  expect(String(r.text)).toContain('Last 30 days (all sessions): Loop breaker')
+})
+
+test("after a reload the same session's log comes back, another session's does not", async ($, on) => {
+  world(on)
+  const entry = { at: 0, feature: 'antiCheat', text: 'a.ts: `as any`' }
+  stored(on, '/t/a.jsonl', { session: { transcript: '/t/a.jsonl', log: [entry], fired: { antiCheat: 1 }, stats: {} } })
+  const r = await $.command.run({ command: 'van-code:log', args: '' } as never)
+  expect(String(r.text)).toContain('a.ts: `as any`')
+})
+
+test("another session's saved log stays out", async ($, on) => {
+  world(on)
+  const entry = { at: 0, feature: 'antiCheat', text: 'a.ts: `as any`' }
+  stored(on, '/t/b.jsonl', { session: { transcript: '/t/a.jsonl', log: [entry], fired: { antiCheat: 1 }, stats: {} } })
+  const r = await $.command.run({ command: 'van-code:log', args: '' } as never)
+  expect(String(r.text)).not.toContain('a.ts')
 })

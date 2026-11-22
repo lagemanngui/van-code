@@ -82,6 +82,13 @@ export function prune(h: unknown, ms: number): History {
   return Object.fromEntries(Object.entries(h as History).filter(([d]) => d >= from))
 }
 
+// Two histories added up, day by day; neither is changed.
+export function merge(a: History, b: History): History {
+  const out: History = {}
+  for (const h of [a, b]) for (const [d, day] of Object.entries(h)) for (const [k, n] of Object.entries(day)) (out[d] ??= {})[k] = (out[d][k] ?? 0) + n
+  return out
+}
+
 export function totals(h: History): Record<string, number> {
   const out: Record<string, number> = {}
   for (const day of Object.values(h)) for (const [k, n] of Object.entries(day)) out[k] = (out[k] ?? 0) + n
