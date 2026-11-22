@@ -44,6 +44,18 @@ Everything Jean-Claude Van Code does, how each guard decides, and every switch. 
 
 - **Reply suggestions.** After each answer, if Claude Code shows no suggestion within 4 seconds, the mod proposes your likely next message (Tab takes it). It never suggests a slash command or repeats what you just sent.
 
+## Reviewing a colleague's change
+
+`/van-code:review` triages a branch or PR before you read line 1, with the same deterministic checks the mod runs on Claude's edits. No model reads it and it spends no tokens.
+
+- **What it reviews:** nothing for the current branch with its uncommitted changes and new files not yet added, a branch name, or a PR (`#123` or its URL, through `gh`; the PR's commits are fetched, your working tree is left alone). The base is `origin/HEAD`, else `main` or `master`, from the merge base.
+- **Reading order by risk.** 1: line by line (migrations, protobuf and Avro, auth, billing and payments, secrets, infra, CI workflows, CODEOWNERS, any file with a blocker). 2: logic. 3: tests. 4: skim (lockfiles, generated code, snapshots, docs, pure renames). Inside a tier, files with findings and bigger changes first.
+- **The checks:** type escapes and lint suppressions, skipped tests and removed assertions (anti-cheat); a `catch` that drops the error; raw payloads or secrets in logs; a query per loop item and unbounded `Promise.all`; debug leftovers and `localhost` URLs (clean-room); migration statements that lock or break a live table; protobuf and Avro changes that break consumers; removed lines a past fix put there (archaeology, with the fix's commit); and a source file with 10 or more new lines where no test that reaches it changed.
+- **Comment drafts,** numbered and labeled `[blocker]` (a concrete production risk), `[question]` (likely wrong, worth asking) or `[suggestion]`, with file and line. Nothing is posted to the PR.
+- **`--claude`** hands the review to Claude too: it checks each blocker and question against the code, proves a claimed scenario with a small test in a temporary `git worktree` where it can, says which hold up, and points to an existing helper in the repo when one solves it.
+
+Limits: for a PR, which tests reach a file is searched in your checked-out tree (a changed test that imports the file by name also counts); files over 300 KB and binaries are listed but not checked.
+
 ## Stack scan
 
 `/van-code:scan` looks for official AI resources for the frameworks and libraries you use, then for community ones where there are none. It runs only when you ask, since it uses the network.

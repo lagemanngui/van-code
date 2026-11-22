@@ -1,4 +1,5 @@
 import { IS_TEST } from './checks.js'
+import { stripStrings } from './cleanroom.js'
 
 // Anti-cheat: an edit that silences a failure instead of fixing it (a type escape, a lint
 // suppression, a skipped test, a swallowed exit code, a removed assertion).
@@ -22,7 +23,8 @@ const count = (text: string, rx: RegExp) => text.match(rx)?.length ?? 0
 export function findCheats(file: string, before: string, after: string): string[] {
   const found: string[] = []
   for (const [label, rx] of MARKERS) {
-    const added = count(after, rx) - count(before, rx)
+    // a marker inside a string is text: a test fixture, an error message
+    const added = count(stripStrings(after), rx) - count(stripStrings(before), rx)
     if (added > 0) found.push(`${label} (+${added})`)
   }
   if (IS_TEST.test(file)) {
@@ -35,7 +37,7 @@ export function findCheats(file: string, before: string, after: string): string[
 // The lines the edit added that carry a marker: removing them is the fix (a removed assertion has none).
 export function cheatLines(before: string, after: string): string[] {
   const had = new Set(before.split('\n').map(l => l.trim()))
-  return after.split('\n').map(l => l.trim()).filter(l => l && !had.has(l) && MARKERS.some(([, rx]) => new RegExp(rx.source).test(l)))
+  return after.split('\n').map(l => l.trim()).filter(l => l && !had.has(l) && MARKERS.some(([, rx]) => new RegExp(rx.source).test(stripStrings(l))))
 }
 
 export const cheatNote = (file: string, found: string[], failure: string) =>

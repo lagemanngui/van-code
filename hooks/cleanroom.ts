@@ -15,8 +15,10 @@ export const isDebug = (line: string) => DEBUG.test(line)
 // A log call that dumps a raw request, payload or secret: it ends up in the log store, readable by everyone with access.
 const LOG_CALL = /\b(console\.(log|info|warn|error|debug)|logger\.\w+|log\.(info|warn|error|debug|trace|fatal|print\w*)|logging\.\w+|slog\.\w+|print)\s*\(/
 const RAW = /\b(req|request|ctx\.request)\.(body|headers|cookies)\b|\b(event|message|msg|job)\.(payload|body|data)\b|\b(password|passwd|secret|api_?key|access_?token|refresh_?token|authorization|cookie|ssn|cpf|card_?number|credit_?card)\b/i
+// String literals on one line emptied: their text is not code (an error message, a test fixture).
+export const stripStrings = (text: string) => text.replace(/(['"`])(?:\\.|(?!\1)[^\n])*\1/g, '""')
 // String literals are text, not data: `logger.error('invalid token')` logs no token.
-export const isPiiLog = (line: string) => LOG_CALL.test(line) && RAW.test(line.replace(/(['"`])(?:\\.|(?!\1).)*\1/g, '""'))
+export const isPiiLog = (line: string) => LOG_CALL.test(line) && RAW.test(stripStrings(line))
 export const isLocalhost = (line: string) => LOCALHOST.test(line)
 
 export function envVars(lines: string[]): string[] {

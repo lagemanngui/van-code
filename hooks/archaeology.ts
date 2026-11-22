@@ -1,7 +1,8 @@
 // Archaeology: lines an edit removes that a fix put there. Code that looks odd is often a bug's scar.
 
-// A commit summary that reads as a fix, a workaround or a tracked issue.
-const FIX = /\b(fix(e[sd])?|bug|race|workaround|hack|regression|revert(s|ed)?|prevent(s|ed)?|hotfix|security|cve-\d+|edge case|crash(es)?)\b|#\d+/i
+// A commit summary that reads as a fix, a workaround or a tracked issue. "fix" only leads it (`fix:`, `Fix the race`):
+// mid-sentence it is often a feature describing itself ("shows what was fixed").
+const FIX = /^\s*(\w+(\([^)]*\))?!?:\s*)?(fix(e[sd])?|hotfix|revert(s|ed)?)\b|\b(bug|race|workaround|hack|regression|prevent(s|ed)?|security|cve-\d+|edge case|crash(es)?)\b|#\d+/i
 
 // The lines of `before` that `after` no longer has, trimmed.
 export function removedLines(before: string, after: string): Set<string> {

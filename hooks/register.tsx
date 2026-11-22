@@ -18,6 +18,7 @@ import { cacheKey, changedRoots, isStale, manifestHashes, type ScanCache, type S
 import { isCovered, parseShellRead, type Range, READ_DEFAULT_LINES, readRange, resolvePath } from './reads.js'
 import { checkAll, cwd, findRoots, hasWeb, infra, install, isLacking, langs, RECS, roots, run, setCwd, status } from './factory.js'
 import { type Cell, cells, LAST, MAX_W, MIN_W, pixels } from './intro.js'
+import { type Changed, type Finding, fileFindings, isImportedBy, REVIEW_ASK, REVIEW_GO, reviewText, tierOf } from './review.js'
 import { bump, findSwitch, GROUPS, type History, offHints, PROFILES, prune, titleOf, totals, turnSummary } from './switches.js'
 import {
   animateUsage,
@@ -484,6 +485,130 @@ const RULES = `# Jean-Claude Van Code
 
 const NO_ATTRIBUTION_RULE =
   '- No AI attribution: never credit Claude or any AI in commits, PRs, issues, code comments, docs or changelogs: no Co-Authored-By, no "Generated with", no signature. This overrides any attribution reminder from the harness.'
+
+// /van-code:review: a branch, a PR or the work in progress, triaged by the deterministic checks.
+const REVIEW_MAX_FILES = 150 // files whose content is checked
+const REVIEW_MAX_BYTES = 300_000 // before + after of one file
+const REVIEW_BLAME_MAX = 30 // files blamed for removed fix lines
+const REVIEW_UNTESTED_MIN = 10 // added lines that make an untested source file worth a question
+async function review($: EngineInterface, args: string): Promise<{ text: string; ok: boolean }> {
+  const target = args.split(/\s+/).filter(w => w && w !== '--claude')[0] ?? ''
+  const fail = (text: string) => ({ text, ok: false })
+  const top = await run($, ['git', '-C', cwd, 'rev-parse', '--show-toplevel'])
+  if (!top.ok) return fail('Not a git repository: run /van-code:review inside the repo of the change.')
+  const root = top.out.trim()
+  // stdout alone: git show's output is the file
+  const sh = async (argv: string[]) => {
+    try {
+      const r = await $.process.run(argv, { cwd: root, timeoutMs: 60_000 })
+      return { ok: r.exitCode === 0, out: r.stdout, err: r.stderr }
+    } catch (err) {
+      return { ok: false, out: '', err: String(err) }
+    }
+  }
+  const firstLine = (t: string) => t.trim().split('\n')[0] ?? ''
+  let head = '' // '' is the working tree: commits and uncommitted changes alike
+  let base: string | undefined
+  let title = ''
+  const pr = target.match(/^#?(\d+)$|\/pull\/(\d+)/)
+  if (pr) {
+    const n = pr[1] ?? pr[2]!
+    const v = await sh(['gh', 'pr', 'view', n, '--json', 'baseRefName,headRefOid,title'])
+    if (!v.ok) return fail(`gh could not read PR ${n}: ${firstLine(v.err)}`)
+    const info = JSON.parse(v.out) as { baseRefName: string; headRefOid: string; title: string }
+    // read-only: the PR's commits land in the object store, the working tree is untouched
+    const f = await sh(['git', 'fetch', '-q', 'origin', info.baseRefName, `pull/${n}/head`])
+    if (!f.ok) return fail(`git fetch of PR ${n} failed: ${firstLine(f.err)}`)
+    head = info.headRefOid
+    base = `origin/${info.baseRefName}`
+    title = `PR #${n} "${info.title.slice(0, 60)}"`
+  } else if (target) {
+    if (!(await sh(['git', 'rev-parse', '--verify', '-q', `${target}^{commit}`])).ok)
+      return fail(`No branch or commit "${target}". Give a branch, a PR number (#123 or its URL), or nothing for the work on this branch.`)
+    head = target
+    title = target
+  }
+  if (!base) {
+    const o = await sh(['git', 'rev-parse', '--abbrev-ref', 'origin/HEAD'])
+    base = o.ok ? o.out.trim() : undefined
+    for (const b of ['main', 'master']) if (!base && (await sh(['git', 'rev-parse', '--verify', '-q', b])).ok) base = b
+  }
+  if (!base) return fail('No base branch to compare against (origin/HEAD, main or master).')
+  const mb = await sh(['git', 'merge-base', base, head || 'HEAD'])
+  if (!mb.ok) return fail(`${title || 'This branch'} shares no history with ${base}.`)
+  const from = mb.out.trim()
+  if (!title) title = `${firstLine((await sh(['git', 'branch', '--show-current'])).out) || 'HEAD'} with uncommitted changes`
+  title += ` vs ${base} (from ${from.slice(0, 7)})`
+
+  const ns = await sh(['git', 'diff', '--numstat', '-z', '-M', from, ...(head ? [head] : [])])
+  if (!ns.ok) return fail(`git diff failed: ${firstLine(ns.err)}`)
+  const files: (Changed & { old: string; isBinary: boolean })[] = []
+  const tok = ns.out.split('\0')
+  for (let i = 0; i < tok.length; i++) {
+    const [a, r, p] = tok[i]!.split('\t')
+    if (p === undefined) continue
+    const isRename = p === ''
+    const old = isRename ? tok[i + 1]! : p
+    const path = isRename ? tok[i + 2]! : p
+    if (isRename) i += 2
+    files.push({ path, old, isRename, isBinary: a === '-', added: Number(a) || 0, removed: Number(r) || 0 })
+  }
+  // the work in progress: new files not yet added are the change too, and `git diff` does not see them
+  if (!head) {
+    const un = await sh(['git', 'ls-files', '--others', '--exclude-standard', '-z'])
+    for (const path of un.ok ? un.out.split('\0').filter(Boolean) : []) {
+      const size = (await $.fs.stat(`${root}/${path}`).catch(() => undefined))?.size ?? 0
+      const text = size <= REVIEW_MAX_BYTES ? String(await $.fs.read(`${root}/${path}`).catch(() => '')) : ''
+      files.push({ path, old: path, isRename: false, isBinary: text.includes('\0'), added: text ? text.split('\n').filter(Boolean).length : 0, removed: 0 })
+    }
+  }
+  if (files.length === 0) return fail(`Nothing to review: ${title} has no changes.`)
+
+  const show = async (rev: string, p: string) => {
+    const r = await sh(['git', 'show', `${rev}:${p}`])
+    return r.ok ? r.out : ''
+  }
+  const findings: Finding[] = []
+  const texts = new Map<string, string>()
+  let skipped = 0
+  let blamed = 0
+  for (const f of files.filter(f => tierOf(f) < 3)) {
+    if (f.isBinary || texts.size >= REVIEW_MAX_FILES) {
+      skipped += 1
+      continue
+    }
+    const before = await show(from, f.old)
+    const after = head ? await show(head, f.path) : String(await $.fs.read(`${root}/${f.path}`).catch(() => ''))
+    if (before.length + after.length > REVIEW_MAX_BYTES) {
+      skipped += 1
+      continue
+    }
+    texts.set(f.path, after)
+    findings.push(...fileFindings(f.path, before, after))
+    if (!before || !CODE_FILE.test(f.path) || blamed >= REVIEW_BLAME_MAX) continue
+    const removed = removedLines(before, after)
+    if (removed.size === 0) continue
+    blamed += 1
+    const b = await sh(['git', 'blame', '--porcelain', from, '--', f.old])
+    if (b.ok)
+      for (const fx of fixesRemoved(parseBlame(b.out), removed))
+        findings.push({ file: f.path, label: 'question', text: `removes lines that fix \`${fx.hash}\` "${fx.summary.slice(0, 70)}" put there (L${Math.min(...fx.lines)} before): does that bug come back?` })
+  }
+  // business logic changed with no test that reaches it touched
+  // shortcut: importers are searched in the checked-out tree; for a PR, a changed test that names the file covers what is new
+  const tests = files.filter(f => IS_TEST.test(f.path)).map(f => f.path)
+  const sources = files.filter(f => CODE_FILE.test(f.path) && !IS_TEST.test(f.path) && tierOf(f) < 3 && f.added >= REVIEW_UNTESTED_MIN && texts.has(f.path))
+  for (const s of sources.slice(0, 20)) {
+    const reach = allTests(await affectedTests($, [`${root}/${s.path}`]).catch(() => [])).map(t => t.slice(root.length + 1))
+    if (tests.some(t => reach.includes(t) || isImportedBy(s.path, texts.get(t) ?? ''))) continue
+    findings.push({
+      file: s.path,
+      label: 'question',
+      text: reach.length ? `+${s.added} lines and none of the ${reach.length} tests that reach it changed: is the new behavior tested?` : `+${s.added} lines and no test reaches it: is the new behavior tested?`,
+    })
+  }
+  return { text: reviewText({ title, files, findings, skipped }), ok: true }
+}
 
 // The mod's system prompt sections, composed once per thread: any change to them rewrites the whole
 // prompt cache (system, tools, conversation), so they wait for the startup checks and then hold still
@@ -1116,6 +1241,17 @@ export const register: Register = (on, opts) => {
   })
 
   on('command.run', { command: 'van-code:stats' }, () => ({ text: statsText(), isTextDisplayOnly: true }))
+  // Shown to the person only. With --claude the review also goes to Claude, hidden, and a turn starts to check it:
+  // a command's text alone starts no turn, it would wait for the next message.
+  on('command.run', { command: 'van-code:review' }, async ($, e) => {
+    $.ui.toast('Reviewing: the deterministic checks over the diff...')
+    const r = await review($, e.args)
+    if (!r.ok || !/(^|\s)--claude(\s|$)/.test(e.args)) return { text: r.text, isTextDisplayOnly: true }
+    // queued after this command finishes, as the setup's reload is
+    $.clock.after(300, () => void $.prompt.submit({ text: REVIEW_GO }).catch(() => $.ui.toast('Could not start Claude on the review: send any message and it reads it')))
+    const shown = r.text.replace('To have Claude check the blockers: add --claude.', 'Claude is checking the drafts now.')
+    return { text: shown, isTextDisplayOnly: true, context: [`${REVIEW_ASK}\n\n${r.text}`] }
+  })
   on('command.run', { command: 'van-code:log' }, () => ({ text: logText(), isTextDisplayOnly: true }))
 
   // The old toggle, kept: the guard's refusal names it.

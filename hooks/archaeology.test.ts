@@ -39,3 +39,13 @@ test('an edit removing a fix line gets the fix commit on its result, once', asyn
   expect((ran.context ?? []).join('\n')).toContain('`aaaaaaa` "Prevent refresh race in mobile clients (#482)" (L10-11)')
   expect(((await edit()).context ?? []).join('\n')).not.toContain('Archaeology') // told once
 })
+
+test('"fix" counts when it leads the summary, not mid-sentence', () => {
+  const row = (summary: string) => ({ hash: 'a'.repeat(40), summary, line: 1, text: 'guard()' })
+  const removed = new Set(['guard()'])
+  expect(fixesRemoved([row('fix: empty input crashed')], removed)).toHaveLength(1)
+  expect(fixesRemoved([row('Fix the retry loop')], removed)).toHaveLength(1)
+  expect(fixesRemoved([row('feat(api)!: fix duplicate events')], removed)).toHaveLength(1)
+  expect(fixesRemoved([row('Log shows what was fixed or kept')], removed)).toHaveLength(0)
+  expect(fixesRemoved([row('Handle the race in the consumer')], removed)).toHaveLength(1)
+})

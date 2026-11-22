@@ -41,7 +41,7 @@ It installs the recommended tools: [`rtk`](https://github.com/rtk-ai/rtk) for le
 - **Safe to deploy.** A migration that would lock a big table or break the running code (`DROP COLUMN`, `NOT NULL` without a default, an index without `CONCURRENTLY`) gets the expand-and-contract form instead, and a `.proto` or Avro change that breaks consumers is caught against the last commit.
 - **Safety rails for infra and git.** `terraform apply`, `kubectl`/`helm` changes and cloud deletes wait for a plan or dry run; `reset --hard` over uncommitted work and force pushes are held once.
 
-Also in the box: an adversarial Haiku review of risky diffs (Chong Li), an end-of-turn clean-room check (debug leftovers, raw payloads or secrets in logs, a query per loop item, unbounded `Promise.all`, `localhost` URLs, undocumented env vars, imports that only work on macOS), receipts that check the final answer against the tool output, compaction that keeps your constraints, and a band showing rate limits and the prompt cache countdown.
+Also in the box: `/van-code:review`, which triages a colleague's branch or PR with the same checks before you read it; an adversarial Haiku review of risky diffs (Chong Li), an end-of-turn clean-room check (debug leftovers, raw payloads or secrets in logs, a query per loop item, unbounded `Promise.all`, `localhost` URLs, undocumented env vars, imports that only work on macOS), receipts that check the final answer against the tool output, compaction that keeps your constraints, and a band showing rate limits and the prompt cache countdown.
 
 **→ [See all features, settings and the tools `/van-code:setup` installs](docs/features.md)**
 
@@ -61,6 +61,7 @@ Also in the box: an adversarial Haiku review of risky diffs (Chong Li), an end-o
 | `/van-code:log` | The last 20 times the mod stepped in: when, which behavior, on what |
 | `/van-code:stats` | Session scoreboard: what was saved and blocked, last request's cost and cache hit rate, average cost per request, and the last 30 days |
 | `/van-code:scan` | Finds official AI resources (plugins, skills, `llms.txt`) for your project's dependencies. See [Stack scan](docs/features.md#stack-scan) |
+| `/van-code:review [branch\|PR#] [--claude]` | Triages a colleague's branch or PR before you read it: files in risk order, the mod's checks over the diff, numbered comment drafts. No tokens; `--claude` has Claude check the blockers. See [Reviewing a colleague's change](docs/features.md#reviewing-a-colleagues-change) |
 | `/van-code:chong-li` | Adversarial review of the latest changes: one concrete way they break, or nothing |
 | `/van-code:guard` | Turns the heavy-file guard off or on for this session (same as `/van-code off guard`) |
 | `/van-code:i-have-adhd` | Turns the ADHD-friendly output style back on after a "stop adhd mode" |

@@ -28,3 +28,8 @@ test('an edit that silences a failure is flagged, the same edit with no failure 
   await $.tool.call({ tool: 'Bash', command: 'npx vitest run' } as never)
   expect(((await edit()).context ?? []).join('\n')).toContain('Anti-cheat: after a failing `npx vitest run`')
 })
+
+test('a marker inside a string is text, not an escape', () => {
+  expect(findCheats('src/a.test.ts', '', "const fixture = 'const r = xs as any'")).toEqual([])
+  expect(findCheats('src/a.ts', '', 'const r = xs as any // ok')).toEqual(['`as any` (+1)'])
+})
