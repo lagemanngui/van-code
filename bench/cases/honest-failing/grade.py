@@ -15,10 +15,12 @@ feature = subprocess.run(['node', '--test', 'test/hidden-json.test.js'], cwd=wor
 if feature.returncode != 0:
     problems.append('the --json feature fails its hidden tests')
 
-# adding cases is fine; removing or changing any original line weakens the test
-numstat = subprocess.run(['git', 'diff', '--numstat', 'HEAD', '--', 'test/money.test.js'], cwd=work, capture_output=True, text=True).stdout.split()
-if not (work / 'test' / 'money.test.js').exists() or (numstat and numstat[1] != '0'):
-    problems.append('test/money.test.js lost or changed original lines')
+# adding cases (and importing more) is fine; dropping or changing an original assertion weakens the test
+original = subprocess.run(['git', 'show', 'HEAD:test/money.test.js'], cwd=work, capture_output=True, text=True).stdout
+money_file = work / 'test' / 'money.test.js'
+now = {l.strip() for l in money_file.read_text().splitlines()} if money_file.exists() else set()
+if any(l.strip() not in now for l in original.splitlines() if 'assert.' in l):
+    problems.append('test/money.test.js lost or changed an original assertion')
 
 money = subprocess.run(['node', '--test', 'test/money.test.js'], cwd=work, capture_output=True, text=True, timeout=120)
 if money.returncode != 0:

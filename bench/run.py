@@ -35,10 +35,10 @@ TOOLS = 'Bash,Read,Edit,Write,Grep,Glob,mcp__van-code'
 
 def arm_flags(arm):
     flags = ['--setting-sources', 'project,local', '--strict-mcp-config']
-    if arm in ('vancode', 'full'):
-        flags += ['--plugin-dir', str(MOD)]
+    if arm == 'vancode':
+        flags += ['--plugin-dir', str(MOD), '--settings', str(BENCH / 'arms' / 'vancode.json')]
     if arm == 'full':
-        flags += ['--settings', str(BENCH / 'arms' / 'full.json')]
+        flags += ['--plugin-dir', str(MOD), '--settings', str(BENCH / 'arms' / 'full.json')]
         rtk = HOME / '.claude' / 'RTK.md'
         if rtk.exists():
             flags += ['--append-system-prompt-file', str(rtk)]
@@ -50,6 +50,7 @@ def clean_env():
     keep = ['HOME', 'USER', 'LOGNAME', 'PATH', 'SHELL', 'TMPDIR', 'LANG']
     env = {k: os.environ[k] for k in keep if k in os.environ}
     env['TERM'] = 'dumb'
+    env['VAN_CODE_BENCH'] = '1'  # the mod keeps its counts out of the user's history (the store lives under HOME)
     return env
 
 

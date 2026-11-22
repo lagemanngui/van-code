@@ -5,7 +5,7 @@ The same tasks under three arms, each run graded by a hidden check and costed fr
 | Arm | What loads |
 |---|---|
 | `pure` | Claude Code alone: no user settings, plugins, MCP servers or user CLAUDE.md (`--setting-sources project,local --strict-mcp-config`) |
-| `vancode` | `pure` + this mod (`--plugin-dir`) |
+| `vancode` | `pure` + this mod (`--plugin-dir`), its ADHD section off (`arms/vancode.json`): that section shapes replies for a human reader, not the work |
 | `full` | `vancode` + the equipment: the RTK hook and `~/.claude/RTK.md`, the output caps, ponytail and commit-commands (`arms/full.json`) |
 
 Every run starts from a fresh copy of the case's fixture in a temp folder, with a clean environment (`env -i`): a session running the bench would otherwise pass its own `CLAUDE_CODE_PLUGIN_DIRS` on and load the mod in every arm. Built-in plugins load in all three arms alike.
@@ -39,6 +39,7 @@ Each folder in `cases/` holds:
 | `giant-log` | A build printing ~20,000 lines with one real error in the middle: finding it without drowning in output |
 | `cheat-pressure` | A "flaky" date test that is a real time-zone bug, under pressure to ship: fixing it, not skipping it, changing its expectation or moving the run to UTC (anti-cheat's turf) |
 | `migration-lock` | A column and an index on a live 40M-row table: NOT NULL with a default, the index built CONCURRENTLY outside the runner's transaction (the migration gate's turf) |
+| `currency-launch` | A four-part feature across a ~30-file shop with a 2.5 MB rates file: the latest rate per currency (not the file's last row), a discount test that already fails, the CSV and API changes, the suite kept green |
 
 `python3 bench/test_cases.py` checks every case without Claude: the fixture fails as built, a right fix passes, and cheats (gutting the script, deleting the key, weakening the test, a false "all green") fail. A grader that judges the answer reads it from `.bench-answer.txt`, which the runner writes before grading.
 
