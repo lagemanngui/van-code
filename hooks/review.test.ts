@@ -1,6 +1,6 @@
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
-import { fileFindings, isImportedBy, reviewText, swallowCount, tierOf } from './review.js'
+import { fileFindings, isImportedBy, parseRemotePr, reviewText, slugOf, swallowCount, tierOf } from './review.js'
 
 const ch = (path: string, added = 1, removed = 0, isRename = false) => ({ path, added, removed, isRename })
 
@@ -10,6 +10,7 @@ test('files sort into risk tiers by path', () => {
   expect(tierOf(ch('proto/order.proto'))).toBe(0)
   expect(tierOf(ch('src/orders/handler.ts'))).toBe(1)
   expect(tierOf(ch('src/orders/handler.test.ts'))).toBe(2)
+  expect(tierOf(ch('test.js'))).toBe(2) // ava and node:test keep it at the root
   expect(tierOf(ch('package-lock.json', 900, 200))).toBe(3)
   expect(tierOf(ch('src/__snapshots__/a.snap'))).toBe(3)
   expect(tierOf(ch('src/new-name.ts', 0, 0, true))).toBe(3) // a pure rename
@@ -104,4 +105,45 @@ test('--claude keeps the review on screen, hands it to Claude hidden, and starts
   expect(r.context?.[0]).toContain('review follows')
   expect(r.context?.[0]).toContain('debug leftover')
   expect(scheduled).toBe(1)
+})
+
+test('a PR named in full is read from its URL or org/repo#n; a GitHub remote gives its slug', () => {
+  expect(parseRemotePr('https://github.com/acme/api/pull/42')).toEqual({ slug: 'acme/api', n: '42' })
+  expect(parseRemotePr('github.com/acme/api.v2/pull/7/files')).toEqual({ slug: 'acme/api.v2', n: '7' })
+  expect(parseRemotePr('acme/api#42')).toEqual({ slug: 'acme/api', n: '42' })
+  expect(parseRemotePr('#42')).toBeUndefined()
+  expect(parseRemotePr('feature/x')).toBeUndefined()
+  expect(slugOf('git@github.com:Acme/API.git\n')).toBe('acme/api')
+  expect(slugOf('https://github.com/acme/api')).toBe('acme/api')
+  expect(slugOf('https://gitlab.com/acme/api.git')).toBeUndefined()
+})
+
+test('a PR of a repo not cloned here is reviewed from the cached clone, and Claude is told where it is', async ($, on) => {
+  const cache = '/home/u/.cache/van-code/repos/github.com/acme/api.git'
+  const seen: string[] = []
+  on('session.cwd', () => ({ value: '/elsewhere' }) as never)
+  on('env.get', () => ({ value: '/home/u' }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('clock.after', () => ({ value: { cancel: () => {} } }) as never)
+  on('fs.stat', () => ({ value: { kind: 'file', size: 10, mtimeMs: 1, isLink: false } }) as never) // the cache exists
+  on('process.run', (_, e) => {
+    const { argv, init } = e as { argv: string[]; init?: { cwd?: string } }
+    const a = argv.join(' ')
+    seen.push(`${init?.cwd ?? ''} ${a}`)
+    const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '' } }) as never
+    if (a.includes('--show-toplevel')) return out('', 128) // not in a repo
+    if (a.startsWith('gh pr view')) return out(JSON.stringify({ baseRefName: 'main', baseRefOid: 'ba5e', headRefOid: 'f00d', title: 'Add paid flag' }))
+    if (a.startsWith('git fetch')) return out('')
+    if (a.includes('merge-base')) return out('abc123\n')
+    if (a.includes('diff --numstat')) return out('1\t0\tdb/migrate/1_paid.rb\0')
+    if (a.includes('show f00d:db/migrate/1_paid.rb')) return out('add_column :orders, :paid, :boolean, null: false\n')
+    return out('', 1)
+  })
+  const r = (await $.command.run({ command: 'van-code:review', args: 'https://github.com/acme/api/pull/42 --claude' } as never)) as { text?: string; context?: string[] }
+  expect(r.text).toContain('acme/api PR #42 "Add paid flag" vs origin/main (from abc123)')
+  expect(seen).toContain(`${cache} git merge-base ba5e f00d`) // the PR's own base: a merged PR still has its diff
+  expect(r.text).toContain('[blocker] db/migrate/1_paid.rb')
+  expect(seen).toContain(`${cache} gh pr view 42 --json baseRefName,baseRefOid,headRefOid,title -R acme/api`)
+  expect(seen.some(c => c.startsWith('gh repo clone'))).toBe(false) // cached already: no clone
+  expect(r.context?.[0]).toContain(`it is in ${cache}`)
 })

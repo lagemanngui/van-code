@@ -1,6 +1,6 @@
 import type { EngineInterface, ModelUsage, PluginOptions, Register, SessionMessage, ToolResultSummary } from 'claude-code'
 
-import { affectedTests, allTests, checkFile, dirOf, exists, findUp, IS_TEST, namedTests, reachesAny, testsText } from './checks.js'
+import { affectedTests, allTests, checkFile, testsIn, dirOf, exists, findUp, IS_TEST, namedTests, reachesAny, testsText } from './checks.js'
 import { cardKind, cardNote } from './card.js'
 import { cheatLines, cheatNote, findCheats } from './cheats.js'
 import { outline } from './outline.js'
@@ -18,7 +18,7 @@ import { cacheKey, changedRoots, isStale, manifestHashes, type ScanCache, type S
 import { isCovered, parseShellRead, type Range, READ_DEFAULT_LINES, readRange, resolvePath } from './reads.js'
 import { checkAll, cwd, findRoots, hasWeb, infra, install, isLacking, langs, RECS, roots, run, setCwd, status } from './factory.js'
 import { type Cell, cells, LAST, MAX_W, MIN_W, pixels } from './intro.js'
-import { type Changed, type Finding, fileFindings, isImportedBy, REVIEW_ASK, REVIEW_GO, reviewText, tierOf } from './review.js'
+import { type Changed, type Finding, fileFindings, isImportedBy, parseRemotePr, REVIEW_ASK, REVIEW_GO, reviewText, slugOf, tierOf } from './review.js'
 import { bump, findSwitch, GROUPS, type History, offHints, PROFILES, prune, titleOf, totals, turnSummary } from './switches.js'
 import {
   animateUsage,
@@ -491,16 +491,36 @@ const REVIEW_MAX_FILES = 150 // files whose content is checked
 const REVIEW_MAX_BYTES = 300_000 // before + after of one file
 const REVIEW_BLAME_MAX = 30 // files blamed for removed fix lines
 const REVIEW_UNTESTED_MIN = 10 // added lines that make an untested source file worth a question
-async function review($: EngineInterface, args: string): Promise<{ text: string; ok: boolean }> {
+const REVIEW_CACHE = '.cache/van-code/repos/github.com' // under HOME
+// A repo the person has no clone of here: a bare clone (no working tree), kept and fetched again next time.
+// Whole, not `--filter=blob:none`: the host turns off git's lazy fetching (GIT_NO_LAZY_FETCH), so missing contents never arrive.
+async function cachedRepo($: EngineInterface, slug: string): Promise<{ dir: string } | { error: string }> {
+  const dir = `${await $.env.get('HOME')}/${REVIEW_CACHE}/${slug}.git`
+  if (await exists($, `${dir}/HEAD`)) return { dir }
+  $.ui.toast(`First review of ${slug}: cloning it (no working tree) into ~/${REVIEW_CACHE}...`)
+  const r = await $.process.run(['gh', 'repo', 'clone', slug, dir, '--', '--bare', '-q'], { timeoutMs: 600_000 }).catch(err => ({ exitCode: 1, stdout: '', stderr: String(err) }))
+  return r.exitCode === 0 ? { dir } : { error: `gh could not clone ${slug}: ${r.stderr.trim().split('\n')[0]}` }
+}
+
+async function review($: EngineInterface, args: string): Promise<{ text: string; ok: boolean; where?: string }> {
   const target = args.split(/\s+/).filter(w => w && w !== '--claude')[0] ?? ''
   const fail = (text: string) => ({ text, ok: false })
   const top = await run($, ['git', '-C', cwd, 'rev-parse', '--show-toplevel'])
-  if (!top.ok) return fail('Not a git repository: run /van-code:review inside the repo of the change.')
-  const root = top.out.trim()
+  let root = top.ok ? top.out.trim() : ''
+  const remote = parseRemotePr(target)
+  let where: string | undefined // the cached clone, when the review is not in the person's own
+  if (remote) {
+    const origin = root ? await run($, ['git', '-C', root, 'remote', 'get-url', 'origin']) : undefined
+    if (!origin?.ok || slugOf(origin.out) !== remote.slug.toLowerCase()) {
+      const c = await cachedRepo($, remote.slug)
+      if ('error' in c) return fail(c.error)
+      root = where = c.dir
+    }
+  } else if (!root) return fail('Not a git repository: run /van-code:review inside the repo of the change, or give a PR URL (github.com/org/repo/pull/123) or org/repo#123.')
   // stdout alone: git show's output is the file
-  const sh = async (argv: string[]) => {
+  const sh = async (argv: string[], timeoutMs = 60_000) => {
     try {
-      const r = await $.process.run(argv, { cwd: root, timeoutMs: 60_000 })
+      const r = await $.process.run(argv, { cwd: root, timeoutMs })
       return { ok: r.exitCode === 0, out: r.stdout, err: r.stderr }
     } catch (err) {
       return { ok: false, out: '', err: String(err) }
@@ -510,21 +530,23 @@ async function review($: EngineInterface, args: string): Promise<{ text: string;
   let head = '' // '' is the working tree: commits and uncommitted changes alike
   let base: string | undefined
   let title = ''
-  const pr = target.match(/^#?(\d+)$|\/pull\/(\d+)/)
+  const pr = remote ?? (/^#?\d+$/.test(target) ? { slug: '', n: target.replace('#', '') } : undefined)
   if (pr) {
-    const n = pr[1] ?? pr[2]!
-    const v = await sh(['gh', 'pr', 'view', n, '--json', 'baseRefName,headRefOid,title'])
-    if (!v.ok) return fail(`gh could not read PR ${n}: ${firstLine(v.err)}`)
-    const info = JSON.parse(v.out) as { baseRefName: string; headRefOid: string; title: string }
-    // read-only: the PR's commits land in the object store, the working tree is untouched
-    const f = await sh(['git', 'fetch', '-q', 'origin', info.baseRefName, `pull/${n}/head`])
+    const { n, slug } = pr
+    const v = await sh(['gh', 'pr', 'view', n, '--json', 'baseRefName,baseRefOid,headRefOid,title', ...(slug ? ['-R', slug] : [])])
+    if (!v.ok) return fail(`gh could not read PR ${slug}#${n}: ${firstLine(v.err)}`)
+    const info = JSON.parse(v.out) as { baseRefName: string; baseRefOid: string; headRefOid: string; title: string }
+    // read-only: the PR's commits land in the object store, the working tree is untouched; the explicit
+    // refspec also gives a bare clone, which tracks nothing, its origin/<base>
+    const f = await sh(['git', 'fetch', '-q', 'origin', `+refs/heads/${info.baseRefName}:refs/remotes/origin/${info.baseRefName}`, `pull/${n}/head`], 300_000)
     if (!f.ok) return fail(`git fetch of PR ${n} failed: ${firstLine(f.err)}`)
     head = info.headRefOid
-    base = `origin/${info.baseRefName}`
-    title = `PR #${n} "${info.title.slice(0, 60)}"`
+    // the PR's own base commit: against today's base tip, a merged PR has no diff left
+    base = info.baseRefOid
+    title = `${slug ? `${slug} ` : ''}PR #${n} "${info.title.slice(0, 60)}" vs origin/${info.baseRefName}`
   } else if (target) {
     if (!(await sh(['git', 'rev-parse', '--verify', '-q', `${target}^{commit}`])).ok)
-      return fail(`No branch or commit "${target}". Give a branch, a PR number (#123 or its URL), or nothing for the work on this branch.`)
+      return fail(`No branch or commit "${target}". Give a branch, a PR (#123, org/repo#123 or its URL), or nothing for the work on this branch.`)
     head = target
     title = target
   }
@@ -538,7 +560,7 @@ async function review($: EngineInterface, args: string): Promise<{ text: string;
   if (!mb.ok) return fail(`${title || 'This branch'} shares no history with ${base}.`)
   const from = mb.out.trim()
   if (!title) title = `${firstLine((await sh(['git', 'branch', '--show-current'])).out) || 'HEAD'} with uncommitted changes`
-  title += ` vs ${base} (from ${from.slice(0, 7)})`
+  title += `${pr ? '' : ` vs ${base}`} (from ${from.slice(0, 7)})`
 
   const ns = await sh(['git', 'diff', '--numstat', '-z', '-M', from, ...(head ? [head] : [])])
   if (!ns.ok) return fail(`git diff failed: ${firstLine(ns.err)}`)
@@ -595,11 +617,12 @@ async function review($: EngineInterface, args: string): Promise<{ text: string;
         findings.push({ file: f.path, label: 'question', text: `removes lines that fix \`${fx.hash}\` "${fx.summary.slice(0, 70)}" put there (L${Math.min(...fx.lines)} before): does that bug come back?` })
   }
   // business logic changed with no test that reaches it touched
-  // shortcut: importers are searched in the checked-out tree; for a PR, a changed test that names the file covers what is new
+  // importers searched at the reviewed commit (the working tree for work in progress, where a new untracked
+  // test is not in git grep: a changed test that names the file covers it too)
   const tests = files.filter(f => IS_TEST.test(f.path)).map(f => f.path)
   const sources = files.filter(f => CODE_FILE.test(f.path) && !IS_TEST.test(f.path) && tierOf(f) < 3 && f.added >= REVIEW_UNTESTED_MIN && texts.has(f.path))
   for (const s of sources.slice(0, 20)) {
-    const reach = allTests(await affectedTests($, [`${root}/${s.path}`]).catch(() => [])).map(t => t.slice(root.length + 1))
+    const reach: string[] = await testsIn($, root, [s.path], head || undefined).catch(() => [])
     if (tests.some(t => reach.includes(t) || isImportedBy(s.path, texts.get(t) ?? ''))) continue
     findings.push({
       file: s.path,
@@ -607,7 +630,7 @@ async function review($: EngineInterface, args: string): Promise<{ text: string;
       text: reach.length ? `+${s.added} lines and none of the ${reach.length} tests that reach it changed: is the new behavior tested?` : `+${s.added} lines and no test reaches it: is the new behavior tested?`,
     })
   }
-  return { text: reviewText({ title, files, findings, skipped }), ok: true }
+  return { text: reviewText({ title, files, findings, skipped }), ok: true, ...(where ? { where } : {}) }
 }
 
 // The mod's system prompt sections, composed once per thread: any change to them rewrites the whole
@@ -1250,7 +1273,8 @@ export const register: Register = (on, opts) => {
     // queued after this command finishes, as the setup's reload is
     $.clock.after(300, () => void $.prompt.submit({ text: REVIEW_GO }).catch(() => $.ui.toast('Could not start Claude on the review: send any message and it reads it')))
     const shown = r.text.replace('To have Claude check the blockers: add --claude.', 'Claude is checking the drafts now.')
-    return { text: shown, isTextDisplayOnly: true, context: [`${REVIEW_ASK}\n\n${r.text}`] }
+    const at = r.where ? `\n\nThe code is not in this folder: it is in ${r.where}, a bare clone without a working tree. Read a file with \`git -C ${r.where} show <commit>:<path>\`; for a test, \`git -C ${r.where} worktree add <temp dir> <commit>\`.` : ''
+    return { text: shown, isTextDisplayOnly: true, context: [`${REVIEW_ASK}${at}\n\n${r.text}`] }
   })
   on('command.run', { command: 'van-code:log' }, () => ({ text: logText(), isTextDisplayOnly: true }))
 

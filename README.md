@@ -61,7 +61,7 @@ Also in the box: `/van-code:review`, which triages a colleague's branch or PR wi
 | `/van-code:log` | The last 20 times the mod stepped in: when, which behavior, on what |
 | `/van-code:stats` | Session scoreboard: what was saved and blocked, last request's cost and cache hit rate, average cost per request, and the last 30 days |
 | `/van-code:scan` | Finds official AI resources (plugins, skills, `llms.txt`) for your project's dependencies. See [Stack scan](docs/features.md#stack-scan) |
-| `/van-code:review [branch\|PR#] [--claude]` | Triages a colleague's branch or PR before you read it: files in risk order, the mod's checks over the diff, numbered comment drafts. No tokens; `--claude` has Claude check the blockers. See [Reviewing a colleague's change](docs/features.md#reviewing-a-colleagues-change) |
+| `/van-code:review [branch\|#123\|org/repo#123\|PR URL] [--claude]` | Triages a colleague's branch or PR before you read it: files in risk order, the mod's checks over the diff, numbered comment drafts. No tokens; `--claude` has Claude check the blockers. See [Reviewing a colleague's change](docs/features.md#reviewing-a-colleagues-change) |
 | `/van-code:chong-li` | Adversarial review of the latest changes: one concrete way they break, or nothing |
 | `/van-code:guard` | Turns the heavy-file guard off or on for this session (same as `/van-code off guard`) |
 | `/van-code:i-have-adhd` | Turns the ADHD-friendly output style back on after a "stop adhd mode" |

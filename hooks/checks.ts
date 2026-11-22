@@ -110,7 +110,7 @@ export async function checkFile(
 }
 
 // Test selector: which tests reach a changed file through imports, found by git grep.
-export const IS_TEST = /(^|\/)(tests?|__tests__|spec)\/|\.(test|spec)\.[cm]?[jt]sx?$|(^|\/)test_[^/]+\.py$|_test\.(py|go)$/
+export const IS_TEST = /(^|\/)(tests?|__tests__|spec)\/|(^|\/)tests?\.[cm]?[jt]sx?$|\.(test|spec)\.[cm]?[jt]sx?$|(^|\/)test_[^/]+\.py$|_test\.(py|go)$/
 const IMPORT_DEPTH = 4
 
 const stemOf = (file: string) => {
@@ -119,16 +119,17 @@ const stemOf = (file: string) => {
   return name === 'index' || name === '__init__' ? dirOf(file).slice(dirOf(file).lastIndexOf('/') + 1) : name
 }
 
-// Files (repo-relative) whose import lines name `stem`.
-async function importersOf($: EngineInterface, root: string, file: string): Promise<string[]> {
+// Files (repo-relative) whose import lines name `stem`: in the working tree, or at commit `rev`.
+async function importersOf($: EngineInterface, root: string, file: string, rev?: string): Promise<string[]> {
   const stem = stemOf(file).replace(/[^\w-]/g, '')
   if (!stem) return []
   const pattern = /\.py$/.test(file)
     ? // POSIX classes only: macOS git grep -E has no \s or \b
       `^[[:space:]]*(from[[:space:]]+([[:alnum:]_]+\\.)*${stem}([[:space:].]|$)|import[[:space:]]+([[:alnum:]_]+\\.)*${stem}([[:space:],]|$)|from[[:space:]]+[[:alnum:]_.]+[[:space:]]+import[[:space:]]+(.*[[:space:],])?${stem}([[:space:],]|$))`
     : `(import|require|from).*['"]([^'"]*/)?${stem}(\\.[a-z]+)?['"]`
-  const r = await run($, ['git', '-C', root, 'grep', '-l', '-E', pattern])
-  return r.ok ? r.out.split('\n').filter(Boolean) : []
+  const r = await run($, ['git', '-C', root, 'grep', '-l', '-E', pattern, ...(rev ? [rev] : [])])
+  // at a commit, git grep names each file `<rev>:<path>`
+  return r.ok ? r.out.split('\n').filter(Boolean).map(l => (rev && l.startsWith(`${rev}:`) ? l.slice(rev.length + 1) : l)) : []
 }
 
 // Tests reaching `files` (absolute) through imports, repo-relative, per repository:
@@ -148,7 +149,7 @@ export async function affectedTests($: EngineInterface, files: string[]): Promis
 // Every test path, absolute, for matching against what a command names.
 export const allTests = (groups: { root: string; tests: string[] }[]) => groups.flatMap(g => g.tests.map(t => `${g.root}/${t}`))
 
-async function testsIn($: EngineInterface, root: string, files: string[]): Promise<string[]> {
+export async function testsIn($: EngineInterface, root: string, files: string[], rev?: string): Promise<string[]> {
   const tests = new Set<string>()
   const seen = new Set<string>()
   let frontier = files.map(f => (f.startsWith(root + '/') ? f.slice(root.length + 1) : f))
@@ -165,7 +166,7 @@ async function testsIn($: EngineInterface, root: string, files: string[]): Promi
         tests.add(`${dirOf(f)}/*_test.go`) // Go tests live beside the package
         continue
       }
-      next.push(...(await importersOf($, root, `${root}/${f}`)))
+      next.push(...(await importersOf($, root, `${root}/${f}`, rev)))
     }
     frontier = next
   }

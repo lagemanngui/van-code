@@ -48,13 +48,14 @@ Everything Jean-Claude Van Code does, how each guard decides, and every switch. 
 
 `/van-code:review` triages a branch or PR before you read line 1, with the same deterministic checks the mod runs on Claude's edits. No model reads it and it spends no tokens.
 
-- **What it reviews:** nothing for the current branch with its uncommitted changes and new files not yet added, a branch name, or a PR (`#123` or its URL, through `gh`; the PR's commits are fetched, your working tree is left alone). The base is `origin/HEAD`, else `main` or `master`, from the merge base.
+- **What it reviews:** nothing for the current branch with its uncommitted changes and new files not yet added, a branch name, or a PR: `#123` in the current repo, or `org/repo#123` and the PR's URL from anywhere. The PR's commits are fetched through `gh` and your working tree is left alone; it is compared from its own base commit, so a merged PR still shows its diff. A branch is compared with `origin/HEAD` (else `main` or `master`) from the merge base.
+- **A repo you have no clone of here.** When the current folder is not that repo (another folder, or no clone on this machine), the review keeps a bare clone (no working tree) in `~/.cache/van-code/repos/github.com/<org>/<repo>.git`, cloned once through `gh` (private repos use your `gh` login) and fetched again on later reviews. It holds the whole history, since `git blame` needs it; `rm -rf ~/.cache/van-code` frees the space. GitHub only.
 - **Reading order by risk.** 1: line by line (migrations, protobuf and Avro, auth, billing and payments, secrets, infra, CI workflows, CODEOWNERS, any file with a blocker). 2: logic. 3: tests. 4: skim (lockfiles, generated code, snapshots, docs, pure renames). Inside a tier, files with findings and bigger changes first.
 - **The checks:** type escapes and lint suppressions, skipped tests and removed assertions (anti-cheat); a `catch` that drops the error; raw payloads or secrets in logs; a query per loop item and unbounded `Promise.all`; debug leftovers and `localhost` URLs (clean-room); migration statements that lock or break a live table; protobuf and Avro changes that break consumers; removed lines a past fix put there (archaeology, with the fix's commit); and a source file with 10 or more new lines where no test that reaches it changed.
 - **Comment drafts,** numbered and labeled `[blocker]` (a concrete production risk), `[question]` (likely wrong, worth asking) or `[suggestion]`, with file and line. Nothing is posted to the PR.
 - **`--claude`** hands the review to Claude too: it checks each blocker and question against the code, proves a claimed scenario with a small test in a temporary `git worktree` where it can, says which hold up, and points to an existing helper in the repo when one solves it.
 
-Limits: for a PR, which tests reach a file is searched in your checked-out tree (a changed test that imports the file by name also counts); files over 300 KB and binaries are listed but not checked.
+Limits: which tests reach a file is searched by import names at the reviewed commit (a changed test that imports the file by name also counts); files over 300 KB and binaries are listed but not checked.
 
 ## Stack scan
 

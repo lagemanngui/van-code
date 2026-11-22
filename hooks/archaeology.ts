@@ -1,8 +1,9 @@
 // Archaeology: lines an edit removes that a fix put there. Code that looks odd is often a bug's scar.
 
 // A commit summary that reads as a fix, a workaround or a tracked issue. "fix" only leads it (`fix:`, `Fix the race`):
-// mid-sentence it is often a feature describing itself ("shows what was fixed").
-const FIX = /^\s*(\w+(\([^)]*\))?!?:\s*)?(fix(e[sd])?|hotfix|revert(s|ed)?)\b|\b(bug|race|workaround|hack|regression|prevent(s|ed)?|security|cve-\d+|edge case|crash(es)?)\b|#\d+/i
+// mid-sentence it is often a feature describing itself ("shows what was fixed"). A bare `(#46)` is how a squash merge
+// names its PR, not a fix: only `fixes #46`, `closes #46`.
+const FIX = /^\s*(\w+(\([^)]*\))?!?:\s*)?(fix(e[sd])?|hotfix|revert(s|ed)?)\b|\b(bug|race|workaround|hack|regression|prevent(s|ed)?|security|cve-\d+|edge case|crash(es)?)\b|\b(fix(e[sd])?|close[sd]?|resolve[sd]?)\s+#\d+/i
 
 // The lines of `before` that `after` no longer has, trimmed.
 export function removedLines(before: string, after: string): Set<string> {

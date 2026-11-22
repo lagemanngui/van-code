@@ -105,7 +105,7 @@ export function reviewText(o: { title: string; files: Changed[]; findings: Findi
   }).filter(Boolean)
   return [
     `Van Code review · ${o.title} · ${o.files.length} file${o.files.length === 1 ? '' : 's'}, +${plus} −${minus}`,
-    drafts.length ? `${count('blocker')} · ${count('question')} · ${count('suggestion')}` : 'No findings from the checks. Not a clean bill: read tier 1 anyway.',
+    drafts.length ? `${count('blocker')} · ${count('question')} · ${count('suggestion')}` : 'No findings from the checks. Not a clean bill: the checks see patterns, not intent, so read the top of the order anyway.',
     '',
     'Read in this order',
     ...tiers,
@@ -116,6 +116,15 @@ export function reviewText(o: { title: string; files: Changed[]; findings: Findi
     `Deterministic checks only, no model read this${o.skipped ? `; ${o.skipped} big or binary files not checked` : ''}. To have Claude check the blockers: add --claude.`,
   ].join('\n')
 }
+
+// A PR on GitHub named in full: its URL or `org/repo#123`. A bare `#123` is the current repo's.
+export function parseRemotePr(target: string): { slug: string; n: string } | undefined {
+  const m = target.match(/^(?:https?:\/\/)?(?:www\.)?github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)|^([\w.-]+\/[\w.-]+)#(\d+)$/)
+  return m ? { slug: (m[1] ?? m[3])!, n: (m[2] ?? m[4])! } : undefined
+}
+
+// `org/repo` of a GitHub remote URL (https or ssh), lowercased, or undefined for another host.
+export const slugOf = (url: string) => url.trim().replace(/\.git$/, '').match(/github\.com[:/]([^/]+\/[^/]+)$/)?.[1]?.toLowerCase()
 
 export const REVIEW_GO = 'Check the /van-code:review drafts: which hold up and which are false alarms.'
 export const REVIEW_ASK =

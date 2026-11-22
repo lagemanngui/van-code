@@ -49,3 +49,10 @@ test('"fix" counts when it leads the summary, not mid-sentence', () => {
   expect(fixesRemoved([row('Log shows what was fixed or kept')], removed)).toHaveLength(0)
   expect(fixesRemoved([row('Handle the race in the consumer')], removed)).toHaveLength(1)
 })
+
+test("a squash merge's (#46) is not a fix; fixes #46 is", () => {
+  const row = (summary: string) => ({ hash: 'b'.repeat(40), summary, line: 1, text: 'guard()' })
+  const removed = new Set(['guard()'])
+  expect(fixesRemoved([row('Add counter for multiple occurrences (#46)')], removed)).toHaveLength(0)
+  expect(fixesRemoved([row('Handle empty input, fixes #46')], removed)).toHaveLength(1)
+})
